@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Ceph-CSI Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2e
 
 import (
@@ -15,7 +31,7 @@ const (
 
 // kmsConfig is an interface that should be used when passing a configuration
 // for a KMS to validation functions. This allows the validation functions to
-// work independently from the actual KMS.
+// work independently of the actual KMS.
 type kmsConfig interface {
 	canGetPassphrase() bool
 	getPassphrase(f *framework.Framework, key string) (string, string)
@@ -106,8 +122,9 @@ func (vc *vaultConfig) canGetPassphrase() bool {
 
 // getPassphrase method will execute few commands to try read the secret for
 // specified key from inside the vault container:
-//  * authenticate with vault and ignore any stdout (we do not need output)
-//  * issue get request for particular key
+//   - authenticate with vault and ignore any stdout (we do not need output)
+//   - issue get request for particular key
+//
 // resulting in stdOut (first entry in tuple) - output that contains the key
 // or stdErr (second entry in tuple) - error getting the key.
 func (vc *vaultConfig) getPassphrase(f *framework.Framework, key string) (string, string) {

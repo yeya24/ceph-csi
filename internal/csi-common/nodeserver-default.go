@@ -19,45 +19,30 @@ package csicommon
 import (
 	"context"
 
-	"github.com/ceph/ceph-csi/internal/util"
+	"github.com/ceph/ceph-csi/internal/util/log"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	mount "k8s.io/mount-utils"
 )
 
 // DefaultNodeServer stores driver object.
 type DefaultNodeServer struct {
-	Driver *CSIDriver
-	Type   string
-}
-
-// NodeStageVolume returns unimplemented response.
-func (ns *DefaultNodeServer) NodeStageVolume(
-	ctx context.Context,
-	req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "")
-}
-
-// NodeUnstageVolume returns unimplemented response.
-func (ns *DefaultNodeServer) NodeUnstageVolume(
-	ctx context.Context,
-	req *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "")
-}
-
-// NodeExpandVolume returns unimplemented response.
-func (ns *DefaultNodeServer) NodeExpandVolume(
-	ctx context.Context,
-	req *csi.NodeExpandVolumeRequest) (*csi.NodeExpandVolumeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "")
+	csi.UnimplementedNodeServer
+	Driver  *CSIDriver
+	Type    string
+	Mounter mount.Interface
+	// NodeLabels stores the node labels
+	NodeLabels map[string]string
+	// CLIReadAffinityOptions contains map options passed through command line to enable read affinity.
+	CLIReadAffinityOptions string
 }
 
 // NodeGetInfo returns node ID.
 func (ns *DefaultNodeServer) NodeGetInfo(
 	ctx context.Context,
-	req *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
-	util.TraceLog(ctx, "Using default NodeGetInfo")
+	req *csi.NodeGetInfoRequest,
+) (*csi.NodeGetInfoResponse, error) {
+	log.TraceLog(ctx, "Using default NodeGetInfo")
 
 	csiTopology := &csi.Topology{
 		Segments: ns.Driver.topology,
@@ -72,8 +57,9 @@ func (ns *DefaultNodeServer) NodeGetInfo(
 // NodeGetCapabilities returns RPC unknown capability.
 func (ns *DefaultNodeServer) NodeGetCapabilities(
 	ctx context.Context,
-	req *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
-	util.TraceLog(ctx, "Using default NodeGetCapabilities")
+	req *csi.NodeGetCapabilitiesRequest,
+) (*csi.NodeGetCapabilitiesResponse, error) {
+	log.TraceLog(ctx, "Using default NodeGetCapabilities")
 
 	return &csi.NodeGetCapabilitiesResponse{
 		Capabilities: []*csi.NodeServiceCapability{
@@ -88,13 +74,6 @@ func (ns *DefaultNodeServer) NodeGetCapabilities(
 	}, nil
 }
 
-// NodeGetVolumeStats returns volume stats.
-func (ns *DefaultNodeServer) NodeGetVolumeStats(
-	ctx context.Context,
-	req *csi.NodeGetVolumeStatsRequest) (*csi.NodeGetVolumeStatsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "")
-}
-
 // ConstructMountOptions returns only unique mount options in slice.
 func ConstructMountOptions(mountOptions []string, volCap *csi.VolumeCapability) []string {
 	if m := volCap.GetMount(); m != nil {
@@ -107,7 +86,7 @@ func ConstructMountOptions(mountOptions []string, volCap *csi.VolumeCapability) 
 
 			return false
 		}
-		for _, f := range m.MountFlags {
+		for _, f := range m.GetMountFlags() {
 			if !hasOption(mountOptions, f) {
 				mountOptions = append(mountOptions, f)
 			}

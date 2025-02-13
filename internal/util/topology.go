@@ -17,29 +17,23 @@ limitations under the License.
 package util
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/ceph/ceph-csi/internal/util/k8s"
+	"github.com/ceph/ceph-csi/internal/util/log"
 )
 
 const (
 	keySeparator   rune   = '/'
 	labelSeparator string = ","
+
+	// topologyPoolsParam is the parameter name used to pass topology constrained pools.
+	topologyPoolsParam = "topologyConstrainedPools"
 )
-
-func k8sGetNodeLabels(nodeName string) (map[string]string, error) {
-	client := NewK8sClient()
-	node, err := client.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get node %q information: %w", nodeName, err)
-	}
-
-	return node.GetLabels(), nil
-}
 
 // GetTopologyFromDomainLabels returns the CSI topology map, determined from
 // the domain labels and their values from the CO system
@@ -58,8 +52,8 @@ func GetTopologyFromDomainLabels(domainLabels, nodeName, driverName string) (map
 	// driverName is validated, and we are adding a lowercase "topology." to it, so no validation for conformance
 
 	// Convert passed in labels to a map, and check for uniqueness
-	labelsToRead := strings.SplitN(domainLabels, labelSeparator, -1)
-	DefaultLog("passed in node labels for processing: %+v", labelsToRead)
+	labelsToRead := strings.Split(domainLabels, labelSeparator)
+	log.DefaultLog("passed in node labels for processing: %+v", labelsToRead)
 
 	labelsIn := make(map[string]bool)
 	labelCount := 0
@@ -74,7 +68,7 @@ func GetTopologyFromDomainLabels(domainLabels, nodeName, driverName string) (map
 		labelCount++
 	}
 
-	nodeLabels, err := k8sGetNodeLabels(nodeName)
+	nodeLabels, err := k8s.GetNodeLabels(nodeName)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +100,7 @@ func GetTopologyFromDomainLabels(domainLabels, nodeName, driverName string) (map
 		return nil, fmt.Errorf("missing domain labels %v on node %q", missingLabels, nodeName)
 	}
 
-	DefaultLog("list of domains processed: %+v", domainMap)
+	log.DefaultLog("list of domains processed: %+v", domainMap)
 
 	topology := make(map[string]string)
 	for domain, value := range domainMap {
@@ -133,11 +127,12 @@ type TopologyConstrainedPool struct {
 // GetTopologyFromRequest extracts TopologyConstrainedPools and passed in accessibility constraints
 // from a CSI CreateVolume request.
 func GetTopologyFromRequest(
-	req *csi.CreateVolumeRequest) (*[]TopologyConstrainedPool, *csi.TopologyRequirement, error) {
+	req *csi.CreateVolumeRequest,
+) (*[]TopologyConstrainedPool, *csi.TopologyRequirement, error) {
 	var topologyPools []TopologyConstrainedPool
 
 	// check if parameters have pool configuration pertaining to topology
-	topologyPoolsStr := req.GetParameters()["topologyConstrainedPools"]
+	topologyPoolsStr := req.GetParameters()[topologyPoolsParam]
 	if topologyPoolsStr == "" {
 		return nil, nil, nil
 	}
@@ -149,7 +144,7 @@ func GetTopologyFromRequest(
 	}
 
 	// extract topology based pools configuration
-	err := json.Unmarshal([]byte(strings.Replace(topologyPoolsStr, "\n", " ", -1)), &topologyPools)
+	err := json.Unmarshal([]byte(strings.ReplaceAll(topologyPoolsStr, "\n", " ")), &topologyPools)
 	if err != nil {
 		return nil, nil, fmt.Errorf(
 			"failed to parse JSON encoded topology constrained pools parameter (%s): %w",
@@ -160,14 +155,15 @@ func GetTopologyFromRequest(
 	return &topologyPools, accessibilityRequirements, nil
 }
 
-// MatchTopologyForPool returns the topology map, if the passed in pool matches any
+// MatchPoolAndTopology returns the topology map, if the passed in pool matches any
 // passed in accessibility constraints.
-func MatchTopologyForPool(topologyPools *[]TopologyConstrainedPool,
-	accessibilityRequirements *csi.TopologyRequirement, poolName string) (map[string]string, error) {
+func MatchPoolAndTopology(topologyPools *[]TopologyConstrainedPool,
+	accessibilityRequirements *csi.TopologyRequirement, poolName string,
+) (string, string, map[string]string, error) {
 	var topologyPool []TopologyConstrainedPool
 
 	if topologyPools == nil || accessibilityRequirements == nil {
-		return nil, nil
+		return "", "", nil, nil
 	}
 
 	// find the pool in the list of topology based pools
@@ -179,13 +175,11 @@ func MatchTopologyForPool(topologyPools *[]TopologyConstrainedPool,
 		}
 	}
 	if len(topologyPool) == 0 {
-		return nil, fmt.Errorf("none of the configured topology pools (%+v) matched passed in pool name (%s)",
+		return "", "", nil, fmt.Errorf("none of the configured topology pools (%+v) matched passed in pool name (%s)",
 			topologyPools, poolName)
 	}
 
-	_, _, topology, err := FindPoolAndTopology(&topologyPool, accessibilityRequirements)
-
-	return topology, err
+	return FindPoolAndTopology(&topologyPool, accessibilityRequirements)
 }
 
 // FindPoolAndTopology loops through passed in "topologyPools" and also related
@@ -193,7 +187,8 @@ func MatchTopologyForPool(topologyPools *[]TopologyConstrainedPool,
 // The return variables are, image poolname, data poolname, and topology map of
 // matched requirement.
 func FindPoolAndTopology(topologyPools *[]TopologyConstrainedPool,
-	accessibilityRequirements *csi.TopologyRequirement) (string, string, map[string]string, error) {
+	accessibilityRequirements *csi.TopologyRequirement,
+) (string, string, map[string]string, error) {
 	if topologyPools == nil || accessibilityRequirements == nil {
 		return "", "", nil, nil
 	}
@@ -216,7 +211,7 @@ func FindPoolAndTopology(topologyPools *[]TopologyConstrainedPool,
 
 	return "", "", nil, fmt.Errorf("none of the topology constrained pools matched requested "+
 		"topology constraints : pools (%+v) requested topology (%+v)",
-		*topologyPools, *accessibilityRequirements)
+		*topologyPools, accessibilityRequirements)
 }
 
 // matchPoolToTopology loops through passed in pools, and for each pool checks if all

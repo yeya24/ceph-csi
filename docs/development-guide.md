@@ -13,7 +13,7 @@ it is **highly** encouraged to:
 
 ### Workspace and repository setup
 
-* [Download](https://golang.org/dl/) Go (>=1.16.x) and
+* [Download](https://golang.org/dl/) Go (>=1.17.x) and
    [install](https://golang.org/doc/install) it on your system.
 * Setup the [GOPATH](http://www.g33knotes.org/2014/07/60-second-count-down-to-go.html)
    environment.
@@ -24,14 +24,14 @@ it is **highly** encouraged to:
 * Ceph-CSI uses the native Ceph libraries through the [go-ceph
    package](https://github.com/ceph/go-ceph). It is required to install the
    Ceph C headers in order to compile Ceph-CSI. The packages are called
-   `librados-devel` and `librbd-devel` on many Linux distributions. See the
-   [go-ceph installaton
+   `librados-devel` , `librbd-devel` and `libcephfs-devel`
+   on many Linux distributions. See the [go-ceph installation
    instructions](https://github.com/ceph/go-ceph#installation) for more
    details.
 * Run
 
     ```console
-    go get -d github.com/ceph/ceph-csi`
+    go get -d github.com/ceph/ceph-csi
     ```
 
    This will just download the source and not build it. The downloaded source
@@ -40,13 +40,13 @@ it is **highly** encouraged to:
 * Add your fork as a git remote:
 
     ```console
-    git remote add fork https://github.com/<your-github-username>/ceph-csi`
+    git remote add fork https://github.com/<your-github-username>/ceph-csi
     ```
 
 * Set up a pre-commit hook to catch issues locally.
 
    ```console
-   pip install pre-commit==2.5.1
+   pip install pre-commit
    pre-commit install
    ```
 
@@ -169,7 +169,7 @@ The `component` in the subject of the commit message can be one of the following
 * `doc`: documentation updates
 * `util`: utilities shared between components use `cephfs` or `rbd` if the
    change is only relevant for one of the type of storage
-* `journal`: any of the journalling functionalities
+* `journal`: any of the journaling functionalities
 * `helm`: deployment changes for the Helm charts
 * `deploy`: updates to Kubernetes templates for deploying components
 * `build`: anything related to building Ceph-CSI, the executable or container
@@ -251,6 +251,8 @@ A few labels interact with automation around the pull requests:
 * ready-to-merge: This PR is ready to be merged and it doesn't need second review
 * DNM: DO NOT MERGE (Mergify will not merge this PR)
 * ci/skip/e2e: skip running e2e CI jobs
+* ci/skip/multi-arch-build: skip building container images for different architectures
+* ok-to-test: PR is ready for e2e testing.
 
 **Review Process:**
 Once your PR has been submitted for review the following criteria will
@@ -267,14 +269,20 @@ need to be met before it will be merged:
   community feedback.
 * The 24 working hours counts hours occurring Mon-Fri in the local timezone
   of the submitter.
+* ceph-csi-maintainers/ceph-csi-contributors can add `ok-to-test` label to the
+  pull request when they think it is ready for e2e testing. This is done to avoid
+  load on the CI.
 * Each PR must be fully updated to devel and tests must have passed
 * If the PR is having trivial changes or the reviewer is confident enough that
   PR doesn't need a second review, the reviewer can set `ready-to-merge` label
   on the PR. The bot will merge the PR if it's having one approval and the
   label `ready-to-merge`.
 
-When the criteria are met, a project maintainer can merge your changes into
-the project's devel branch.
+When the criteria are met, a project maintainer can instruct the Mergify bot to
+queue the PR for merging. This usually is done by leaving two comments:
+
+* `@mergifyio rebase` to rebase on the latest HEAD of the branch
+* `@mergifyio queue` once the rebasing is done, to add the PR to the merge queue
 
 ### Backport a Fix to a Release Branch
 
@@ -295,12 +303,6 @@ opening fresh PRs, rebase of PRs and force pushing changes to existing PRs.
 
 Right now, we also have below commands to manually retrigger the CI jobs
 
-1. To retrigger all the CI jobs, comment the PR with command: `/retest all`
-
-   **Note**:
-
-   This will rerun all the jobs including the jobs which are already passed
-
 1. To retrigger a specific CI job, comment the PR with command: `/retest <job-name>`
 
    example:
@@ -312,15 +314,30 @@ Right now, we also have below commands to manually retrigger the CI jobs
 **Caution**: Please do not retrigger the CI jobs without an understanding of
              the root cause, because:
 
-* We may miss some of the important corner cases which are true negatives,
+* We may miss some important corner cases which are true negatives,
   and hard to reproduce
 * Retriggering jobs for known failures can unnecessarily put CI resources
   under pressure
 
-Hence it is recommended that you please go through the CI logs first, if you
+Hence, it is recommended that you please go through the CI logs first, if you
 are certain about the flaky test failure behavior, then comment on the PR
 indicating the logs about a particular test that went flaky and use the
 appropriate command to retrigger the job[s].
 If you are uncertain about the CI failure, we prefer that you ping us on
-[Slack channel #ci](https://cephcsi.slack.com) with more details on
+[Slack channel #ceph-csi](https://ceph-storage.slack.com) with more details on
 failures before retriggering the jobs, we will be happy to help.
+
+### Retesting failed Jobs
+
+The CI Jobs gets triggered automatically on these events, such as on opening
+fresh PRs, rebase of PRs and force pushing changes to existing PRs.
+
+In case of failed we already documented steps  to manually
+[retrigger](#retriggering-the-ci-jobs) the CI jobs. Sometime the tests might be
+flaky which required manually retriggering always. We have newly added a github
+action which runs periodically to retest the failed PR's. Below are the criteria
+for auto retesting the failed PR.
+
+* Analyze the logs and make sure its a flaky test.
+* Pull Request should have required approvals.
+* `ci/retest/e2e` label should be set on the PR.

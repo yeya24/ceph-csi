@@ -43,6 +43,10 @@ const (
 	// from librbd
 	FeatureOperations = uint64(C.RBD_FEATURE_OPERATIONS)
 
+	// FeatureMigrating is the representation of RBD_FEATURE_MIGRATING from
+	// librbd
+	FeatureMigrating = uint64(C.RBD_FEATURE_MIGRATING)
+
 	// RBD features, strings
 
 	// FeatureNameLayering is the representation of
@@ -80,6 +84,10 @@ const (
 	// FeatureNameOperations is the representation of
 	// RBD_FEATURE_NAME_OPERATIONS from librbd
 	FeatureNameOperations = C.RBD_FEATURE_NAME_OPERATIONS
+
+	// FeatureNameMigrating is the representation of
+	// RBD_FEATURE_NAME_MIGRATING from librbd
+	FeatureNameMigrating = C.RBD_FEATURE_NAME_MIGRATING
 
 	// old names for backwards compatibility (unused?)
 
@@ -124,6 +132,7 @@ var (
 		FeatureNameJournaling:    FeatureJournaling,
 		FeatureNameDataPool:      FeatureDataPool,
 		FeatureNameOperations:    FeatureOperations,
+		FeatureNameMigrating:     FeatureMigrating,
 	}
 )
 
@@ -154,14 +163,15 @@ func (fs *FeatureSet) Names() []string {
 // GetFeatures returns the features bitmask for the rbd image.
 //
 // Implements:
-//  int rbd_get_features(rbd_image_t image, uint64_t *features);
+//
+//	int rbd_get_features(rbd_image_t image, uint64_t *features);
 func (image *Image) GetFeatures() (features uint64, err error) {
 	if err := image.validate(imageIsOpen); err != nil {
 		return 0, err
 	}
 
 	if ret := C.rbd_get_features(image.image, (*C.uint64_t)(&features)); ret < 0 {
-		return 0, rbdError(ret)
+		return 0, getError(ret)
 	}
 
 	return features, nil
@@ -170,8 +180,9 @@ func (image *Image) GetFeatures() (features uint64, err error) {
 // UpdateFeatures updates the features on the Image.
 //
 // Implements:
-//   int rbd_update_features(rbd_image_t image, uint64_t features,
-//                           uint8_t enabled);
+//
+//	int rbd_update_features(rbd_image_t image, uint64_t features,
+//	                        uint8_t enabled);
 func (image *Image) UpdateFeatures(features uint64, enabled bool) error {
 	if image.image == nil {
 		return RbdErrorImageNotOpen

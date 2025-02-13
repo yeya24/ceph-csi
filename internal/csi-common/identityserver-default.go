@@ -19,7 +19,7 @@ package csicommon
 import (
 	"context"
 
-	"github.com/ceph/ceph-csi/internal/util"
+	"github.com/ceph/ceph-csi/internal/util/log"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -28,14 +28,16 @@ import (
 
 // DefaultIdentityServer stores driver object.
 type DefaultIdentityServer struct {
+	csi.UnimplementedIdentityServer
 	Driver *CSIDriver
 }
 
 // GetPluginInfo returns plugin information.
 func (ids *DefaultIdentityServer) GetPluginInfo(
 	ctx context.Context,
-	req *csi.GetPluginInfoRequest) (*csi.GetPluginInfoResponse, error) {
-	util.TraceLog(ctx, "Using default GetPluginInfo")
+	req *csi.GetPluginInfoRequest,
+) (*csi.GetPluginInfoResponse, error) {
+	log.TraceLog(ctx, "Using default GetPluginInfo")
 
 	if ids.Driver.name == "" {
 		return nil, status.Error(codes.Unavailable, "Driver name not configured")
@@ -59,8 +61,9 @@ func (ids *DefaultIdentityServer) Probe(ctx context.Context, req *csi.ProbeReque
 // GetPluginCapabilities returns plugin capabilities.
 func (ids *DefaultIdentityServer) GetPluginCapabilities(
 	ctx context.Context,
-	req *csi.GetPluginCapabilitiesRequest) (*csi.GetPluginCapabilitiesResponse, error) {
-	util.TraceLog(ctx, "Using default capabilities")
+	req *csi.GetPluginCapabilitiesRequest,
+) (*csi.GetPluginCapabilitiesResponse, error) {
+	log.TraceLog(ctx, "Using default capabilities")
 
 	return &csi.GetPluginCapabilitiesResponse{
 		Capabilities: []*csi.PluginCapability{

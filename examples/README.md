@@ -2,11 +2,17 @@
 
 ## Deploying Ceph-CSI services
 
+Create [ceph-config](../deploy/ceph-conf.yaml) configmap using the following command.
+
+```bash
+kubectl apply -f ../deploy/ceph-conf.yaml
+```
+
 Both `rbd` and `cephfs` directories contain `plugin-deploy.sh` and
 `plugin-teardown.sh` helper scripts.  You can use those to help you
 deploy/teardown RBACs, sidecar containers and the plugin in one go.
 By default, they look for the YAML manifests in
-`../../deploy/{rbd,cephfs}/kubernetes`.
+`../deploy/{rbd,cephfs}/kubernetes`.
 You can override this path by running
 
 ```bash
@@ -19,30 +25,66 @@ The CSI plugin requires configuration information regarding the Ceph cluster(s),
 that would host the dynamically or statically provisioned volumes. This
 is provided by adding a per-cluster identifier (referred to as clusterID), and
 the required monitor details for the same, as in the provided [sample config
- map](./csi-config-map-sample.yaml).
+ map](../deploy/csi-config-map-sample.yaml).
 
 Gather the following information from the Ceph cluster(s) of choice,
 
 * Ceph monitor list
-  * Typically in the output of `ceph mon dump`
-  * Used to prepare a list of `monitors` in the CSI configuration file
+   * Typically in the output of `ceph mon dump`
+   * Used to prepare a list of `monitors` in the CSI configuration file
 * Ceph Cluster fsid
-  * If choosing to use the Ceph cluster fsid as the unique value of clusterID,
-    * Output of `ceph fsid`
-  * Alternatively, choose a `<cluster-id>` value that is distinct per Ceph
+   * If choosing to use the Ceph cluster fsid as the unique value of clusterID,
+      * Output of `ceph fsid`
+   * Alternatively, choose a `<cluster-id>` value that is distinct per Ceph
     cluster in use by this kubernetes cluster
 
-Update the [sample configmap](./csi-config-map-sample.yaml) with values
+Update the [sample configmap](../deploy/csi-config-map-sample.yaml) with values
 from a Ceph cluster and replace `<cluster-id>` with the chosen clusterID, to
 create the manifest for the configmap which can be updated in the cluster
 using the following command,
 
 ```bash
-kubectl replace -f ./csi-config-map-sample.yaml
+kubectl replace -f ../deploy/csi-config-map-sample.yaml
 ```
 
 Storage class and snapshot class, using `<cluster-id>` as the value for the
 option `clusterID`, can now be created on the cluster.
+
+## Running CephCSI with pod networking
+
+The current problem with Pod Networking, is when a CephFS/RBD/NFS volume is mounted
+in a pod using Ceph CSI and then the CSI CephFS/RBD/NFS plugin is restarted or
+terminated (e.g. by restarting or deleting its DaemonSet), all operations on
+the volume become blocked, even after restarting the CSI pods.
+
+The only workaround is to restart the node where the Ceph CSI plugin pod was
+restarted. This can be mitigated by running the `rbd map`/`mount -t` commands
+in a different network namespace which does not get deleted when the CSI
+CephFS/RBD/NFS plugin is restarted or terminated.
+
+If someone wants to run the CephCSI with the pod networking they can still do
+by setting the `netNamespaceFilePath`. If this path is set CephCSI will execute
+the `rbd map`/`mount -t` commands after entering the [network
+namespace](https://man7.org/linux/man-pages/man7/network_namespaces.7.html)
+specified by `netNamespaceFilePath` with the
+[nsenter](https://man7.org/linux/man-pages/man1/nsenter.1.html) command.
+
+`netNamespaceFilePath` should point to the network namespace of some
+long-running process, typically it would be a symlink to
+`/proc/<long running process id>/ns/net`.
+
+The long-running process can also be another pod which is a Daemonset which
+never restarts. This Pod should only be stopped and restarted when a node is
+stopped so that volume operations do not become blocked. The new DaemonSet pod
+can contain a single container, responsible for holding its pod network alive.
+It is used as a passthrough by the CephCSI plugin pod which when mounting or
+mapping will use the network namespace of this pod.
+
+Once the pod is created get its PID and create a symlink to
+`/proc/<PID>/ns/net` in the hostPath volume shared with the csi-plugin pod and
+specify the path in the `netNamespaceFilePath` option.
+
+*Note* This Pod should have `hostPID: true` in the Pod Spec.
 
 ## Deploying the storage class
 
@@ -253,4 +295,103 @@ Disk /dev/rbdblock: 1 GiB, 1073741824 bytes, 2097152 sectors
 Units: sectors of 1 * 512 = 512 bytes
 Sector size (logical/physical): 512 bytes / 512 bytes
 I/O size (minimum/optimal): 4194304 bytes / 4194304 bytes
+```
+
+### How to create CephFS Snapshot and Restore
+
+In the `examples/cephfs` directory you will find two files related to snapshots:
+[snapshotclass.yaml](./cephfs/snapshotclass.yaml) and
+[snapshot.yaml](./cephfs/snapshot.yaml).
+
+Once you created your CephFS volume, you'll need to customize at least
+`snapshotclass.yaml` and make sure the `clusterID` parameter matches
+your Ceph cluster setup.
+
+Note that it is recommended to create a volume snapshot or a PVC clone
+only when the PVC is not in use.
+
+After configuring everything you needed, create the snapshot class:
+
+```bash
+kubectl create -f ../examples/cephfs/snapshotclass.yaml
+```
+
+Verify that the snapshot class was created:
+
+```console
+$ kubectl get volumesnapshotclass
+NAME                         DRIVER                DELETIONPOLICY   AGE
+csi-cephfsplugin-snapclass   cephfs.csi.ceph.com   Delete           24m
+```
+
+Create a snapshot from the existing PVC:
+
+```bash
+kubectl create -f ../examples/cephfs/snapshot.yaml
+```
+
+To verify if your volume snapshot has successfully been created and to
+get the details about snapshot, run the following:
+
+```console
+$ kubectl get volumesnapshot
+NAME                  READYTOUSE   SOURCEPVC       SOURCESNAPSHOTCONTENT   RESTORESIZE   SNAPSHOTCLASS                SNAPSHOTCONTENT                                    CREATIONTIME   AGE
+cephfs-pvc-snapshot   true         csi-cephfs-pvc                          1Gi           csi-cephfsplugin-snapclass   snapcontent-34476204-a14a-4d59-bfbc-2bbba695652c   3s             6s
+```
+
+To be sure everything is OK you can run
+`ceph fs subvolume snapshot ls <vol_name> <sub_name> [<group_name>]`
+inside one of your Ceph pod.
+
+To restore the snapshot to a new PVC, deploy
+[pvc-restore.yaml](./cephfs/pvc-restore.yaml) and a testing pod
+[pod-restore.yaml](./cephfs/pod-restore.yaml):
+
+```bash
+kubectl create -f pvc-restore.yaml
+kubectl create -f pod-restore.yaml
+```
+
+### Cleanup for CephFS Snapshot and Restore
+
+Delete the testing pod and restored pvc.
+
+```bash
+kubectl delete pod <pod-restore name>
+kubectl delete pvc <pvc-restore name>
+```
+
+Now, the snapshot is no longer in use, Delete the volume snapshot
+and volume snapshot class.
+
+```bash
+kubectl delete volumesnapshot <snapshot name>
+kubectl delete volumesnapshotclass <snapshotclass name>
+```
+
+### How to Clone CephFS Volumes
+
+Create the clone from cephFS PVC:
+
+```bash
+kubectl create -f ../examples/cephfs/pvc-clone.yaml
+kubectl create -f ../examples/cephfs/pod-clone.yaml
+```
+
+To verify if your clone has successfully been created, run the following:
+
+```console
+$ kubectl get pvc
+NAME                 STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+csi-cephfs-pvc       Bound    pvc-1ea51547-a88b-4ab0-8b4a-812caeaf025d   1Gi        RWX            csi-cephfs-sc  20h
+cephfs-pvc-clone     Bound    pvc-b575bc35-d521-4c41-b4f9-1d733cd28fdf   1Gi        RWX            csi-cephfs-sc  39s
+```
+
+### Cleanup
+
+Delete the cloned pod and pvc:
+
+```bash
+kubectl delete pod <pod-clone name>
+kubectl delete pvc <pvc-clone name>
 ```

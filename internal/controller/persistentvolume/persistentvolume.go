@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,11 +19,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 
 	ctrl "github.com/ceph/ceph-csi/internal/controller"
 	"github.com/ceph/ceph-csi/internal/rbd"
 	"github.com/ceph/ceph-csi/internal/util"
+	"github.com/ceph/ceph-csi/internal/util/log"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -52,11 +52,11 @@ var (
 // Init will add the ReconcilePersistentVolume to the list.
 func Init() {
 	// add ReconcilePersistentVolume to the list
-	ctrl.ControllerList = append(ctrl.ControllerList, ReconcilePersistentVolume{})
+	ctrl.ControllerList = append(ctrl.ControllerList, &ReconcilePersistentVolume{})
 }
 
 // Add adds the newPVReconciler.
-func (r ReconcilePersistentVolume) Add(mgr manager.Manager, config ctrl.Config) error {
+func (r *ReconcilePersistentVolume) Add(mgr manager.Manager, config ctrl.Config) error {
 	return add(mgr, newPVReconciler(mgr, config))
 }
 
@@ -82,7 +82,11 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	}
 
 	// Watch for changes to PersistentVolumes
-	err = c.Watch(&source.Kind{Type: &corev1.PersistentVolume{}}, &handler.EnqueueRequestForObject{})
+	err = c.Watch(source.Kind(
+		mgr.GetCache(),
+		&corev1.PersistentVolume{},
+		&handler.TypedEnqueueRequestForObject[*corev1.PersistentVolume]{}),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to watch the changes: %w", err)
 	}
@@ -93,12 +97,13 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 func (r *ReconcilePersistentVolume) getCredentials(
 	ctx context.Context,
 	name,
-	namespace string) (*util.Credentials, error) {
+	namespace string,
+) (*util.Credentials, error) {
 	var cr *util.Credentials
 
 	if name == "" || namespace == "" {
 		errStr := "secret name or secret namespace is empty"
-		util.ErrorLogMsg(errStr)
+		log.ErrorLogMsg("%v", errStr)
 
 		return nil, errors.New(errStr)
 	}
@@ -117,7 +122,7 @@ func (r *ReconcilePersistentVolume) getCredentials(
 
 	cr, err = util.NewUserCredentials(credentials)
 	if err != nil {
-		util.ErrorLogMsg("failed to get user credentials %s", err)
+		log.ErrorLogMsg("failed to get user credentials %s", err)
 
 		return nil, err
 	}
@@ -125,46 +130,13 @@ func (r *ReconcilePersistentVolume) getCredentials(
 	return cr, nil
 }
 
-func checkStaticVolume(pv *corev1.PersistentVolume) (bool, error) {
-	static := false
-	var err error
-
-	staticVol := pv.Spec.CSI.VolumeAttributes["staticVolume"]
-	if staticVol != "" {
-		static, err = strconv.ParseBool(staticVol)
-		if err != nil {
-			return false, fmt.Errorf("failed to parse preProvisionedVolume: %w", err)
-		}
-	}
-
-	return static, nil
-}
-
-// storeVolumeIDInPV stores the new volumeID in PV object.
-func (r ReconcilePersistentVolume) storeVolumeIDInPV(
-	ctx context.Context,
-	pv *corev1.PersistentVolume,
-	newVolumeID string) error {
-	if v, ok := pv.Annotations[rbd.PVVolumeHandleAnnotationKey]; ok {
-		if v == newVolumeID {
-			return nil
-		}
-	}
-	if pv.Annotations == nil {
-		pv.Annotations = make(map[string]string)
-	}
-	if pv.Labels == nil {
-		pv.Labels = make(map[string]string)
-	}
-	pv.Labels[rbd.PVReplicatedLabelKey] = rbd.PVReplicatedLabelValue
-	pv.Annotations[rbd.PVVolumeHandleAnnotationKey] = newVolumeID
-
-	return r.client.Update(ctx, pv)
+func checkStaticVolume(pv *corev1.PersistentVolume) bool {
+	return pv.Spec.CSI.VolumeAttributes["staticVolume"] == "true"
 }
 
 // reconcilePV will extract the image details from the pv spec and regenerates
 // the omap data.
-func (r ReconcilePersistentVolume) reconcilePV(ctx context.Context, obj runtime.Object) error {
+func (r *ReconcilePersistentVolume) reconcilePV(ctx context.Context, obj runtime.Object) error {
 	pv, ok := obj.(*corev1.PersistentVolume)
 	if !ok {
 		return nil
@@ -172,15 +144,18 @@ func (r ReconcilePersistentVolume) reconcilePV(ctx context.Context, obj runtime.
 	if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != r.config.DriverName {
 		return nil
 	}
+	// PV is not attached to any PVC
+	if pv.Spec.ClaimRef == nil {
+		return nil
+	}
+
+	pvcNamespace := pv.Spec.ClaimRef.Namespace
 	requestName := pv.Name
 	volumeHandler := pv.Spec.CSI.VolumeHandle
 	secretName := ""
 	secretNamespace := ""
 	// check static volume
-	static, err := checkStaticVolume(pv)
-	if err != nil {
-		return err
-	}
+	static := checkStaticVolume(pv)
 	// if the volume is static, dont generate OMAP data
 	if static {
 		return nil
@@ -201,25 +176,29 @@ func (r ReconcilePersistentVolume) reconcilePV(ctx context.Context, obj runtime.
 
 	cr, err := r.getCredentials(ctx, secretName, secretNamespace)
 	if err != nil {
-		util.ErrorLogMsg("failed to get credentials from secret %s", err)
+		log.ErrorLogMsg("failed to get credentials from secret %s", err)
 
 		return err
 	}
 	defer cr.DeleteCredentials()
 
-	rbdVolID, err := rbd.RegenerateJournal(pv.Spec.CSI.VolumeAttributes, volumeHandler, requestName, cr)
+	rbdVolID, err := rbd.RegenerateJournal(
+		pv.Spec.CSI.VolumeAttributes,
+		pv.Spec.ClaimRef.Name,
+		volumeHandler,
+		requestName,
+		pvcNamespace,
+		r.config.ClusterName,
+		r.config.InstanceID,
+		r.config.SetMetadata,
+		cr)
 	if err != nil {
-		util.ErrorLogMsg("failed to regenerate journal %s", err)
+		log.ErrorLogMsg("failed to regenerate journal %s", err)
 
 		return err
 	}
 	if rbdVolID != volumeHandler {
-		err = r.storeVolumeIDInPV(ctx, pv, rbdVolID)
-		if err != nil {
-			util.ErrorLogMsg("failed to store volumeID in PV %s", err)
-
-			return err
-		}
+		log.DebugLog(ctx, "volumeHandler changed from %s to %s", volumeHandler, rbdVolID)
 	}
 
 	return nil
@@ -228,7 +207,8 @@ func (r ReconcilePersistentVolume) reconcilePV(ctx context.Context, obj runtime.
 // Reconcile reconciles the PersistentVolume object and creates a new omap entries
 // for the volume.
 func (r *ReconcilePersistentVolume) Reconcile(ctx context.Context,
-	request reconcile.Request) (reconcile.Result, error) {
+	request reconcile.Request,
+) (reconcile.Result, error) {
 	pv := &corev1.PersistentVolume{}
 	err := r.client.Get(ctx, request.NamespacedName, pv)
 	if err != nil {

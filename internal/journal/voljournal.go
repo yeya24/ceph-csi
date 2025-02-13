@@ -25,8 +25,9 @@ import (
 	"strings"
 
 	"github.com/ceph/ceph-csi/internal/util"
+	"github.com/ceph/ceph-csi/internal/util/log"
 
-	"github.com/pborman/uuid"
+	"github.com/google/uuid"
 )
 
 // Length of string representation of uuid, xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx is 36 bytes.
@@ -130,6 +131,10 @@ type Config struct {
 	// of this Ceph volume
 	csiImageIDKey string
 
+	// CSI GroupName is per Ceph volume object omap, contains the group ID of
+	// this Ceph volume
+	csiGroupIDKey string
+
 	// CSI image-name key in per Ceph volume object map, containing RBD image-name
 	// of this Ceph volume
 	csiImageKey string
@@ -148,8 +153,14 @@ type Config struct {
 	// encryptKMS in which encryption passphrase was saved, default is no encryption
 	encryptKMSKey string
 
+	// encryptKMS in which encryption passphrase was saved, default is no encryption
+	encryptionType string
+
 	// ownerKey is used to identify the owner of the volume, can be used with some KMS configurations
 	ownerKey string
+
+	// backingSnapshotIDKey ID of the snapshot on which the CephFS snapshot-backed volume is based
+	backingSnapshotIDKey string
 
 	// commonPrefix is the prefix common to all omap keys for this Config
 	commonPrefix string
@@ -167,8 +178,11 @@ func NewCSIVolumeJournal(suffix string) *Config {
 		cephSnapSourceKey:       "",
 		namespace:               "",
 		csiImageIDKey:           "csi.imageid",
+		csiGroupIDKey:           "csi.groupid",
 		encryptKMSKey:           "csi.volume.encryptKMS",
+		encryptionType:          "csi.volume.encryptionType",
 		ownerKey:                "csi.volume.owner",
+		backingSnapshotIDKey:    "csi.volume.backingsnapshotid",
 		commonPrefix:            "csi.",
 	}
 }
@@ -185,7 +199,9 @@ func NewCSISnapshotJournal(suffix string) *Config {
 		cephSnapSourceKey:       "csi.source",
 		namespace:               "",
 		csiImageIDKey:           "csi.imageid",
+		csiGroupIDKey:           "csi.groupid",
 		encryptKMSKey:           "csi.volume.encryptKMS",
+		encryptionType:          "csi.volume.encryptionType",
 		ownerKey:                "csi.volume.owner",
 		commonPrefix:            "csi.",
 	}
@@ -260,30 +276,32 @@ func (cj *Config) Connect(monitors, namespace string, cr *util.Credentials) (*Co
 
 /*
 CheckReservation checks if given request name contains a valid reservation
-- If there is a valid reservation, then the corresponding UUID for the volume/snapshot is returned
+- If there is a valid reservation, then the corresponding ImageData for the volume/snapshot is returned
 - If there is a reservation that is stale (or not fully cleaned up), it is garbage collected using
 the UndoReservation call, as appropriate
-- If a snapshot is being checked, then its source is matched to the parentName that is provided
+- If a snapshot is being checked, then its source is matched to the snapParentName that is provided
 
 NOTE: As the function manipulates omaps, it should be called with a lock against the request name
 held, to prevent parallel operations from modifying the state of the omaps for this request name.
 
 Return values:
-	- string: Contains the UUID that was reserved for the passed in reqName, empty if
-	there was no reservation found
-	- error: non-nil in case of any errors
+  - ImageData: which contains the UUID,Pool,PoolID and ImageAttributes that were reserved for the
+    passed in reqName, empty if there was no reservation found
+  - error: non-nil in case of any errors
 */
 func (conn *Connection) CheckReservation(ctx context.Context,
-	journalPool, reqName, namePrefix, parentName, kmsConfig string) (*ImageData, error) {
+	journalPool, reqName, namePrefix, snapParentName, kmsConfig string,
+	encryptionType util.EncryptionType,
+) (*ImageData, error) {
 	var (
 		snapSource       bool
 		objUUID          string
 		savedImagePool   string
-		savedImagePoolID int64 = util.InvalidPoolID
-		cj                     = conn.config
+		savedImagePoolID = util.InvalidPoolID
+		cj               = conn.config
 	)
 
-	if parentName != "" {
+	if snapParentName != "" {
 		if cj.cephSnapSourceKey == "" {
 			err := errors.New("invalid request, cephSnapSourceKey is nil")
 
@@ -371,18 +389,28 @@ func (conn *Connection) CheckReservation(ctx context.Context,
 		}
 	}
 
+	if encryptionType != util.EncryptionTypeNone {
+		if savedImageAttributes.EncryptionType != encryptionType {
+			return nil, fmt.Errorf("internal state inconsistent, omap encryption type"+
+				" mismatch, request type %q(%d) volume UUID (%s) volume omap encryption type %q (%d)",
+				encryptionType, encryptionType,
+				objUUID, savedImageAttributes.EncryptionType,
+				savedImageAttributes.EncryptionType)
+		}
+	}
+
 	// TODO: skipping due to excessive poolID to poolname call, also this should never happen!
 	// check if journal pool points back to the passed in journal pool
 	// if savedJournalPoolID != journalPoolID {
 
 	if snapSource {
 		// check if source UUID key points back to the parent volume passed in
-		if savedImageAttributes.SourceName != parentName {
+		if savedImageAttributes.SourceName != snapParentName {
 			// NOTE: This can happen if there is a snapname conflict, and we already have a snapshot
 			// with the same name pointing to a different UUID as the source
 			err = fmt.Errorf("%w: snapname points to different volume, request name (%s)"+
-				" source name (%s) saved source name (%s)", util.ErrSnapNameConflict,
-				reqName, parentName, savedImageAttributes.SourceName)
+				" source name (%s) : saved source name (%s)", util.ErrSnapNameConflict,
+				reqName, snapParentName, savedImageAttributes.SourceName)
 
 			return nil, err
 		}
@@ -409,12 +437,13 @@ NOTE: As the function manipulates omaps, it should be called with a lock against
 held, to prevent parallel operations from modifying the state of the omaps for this request name.
 
 Input arguments:
-	- csiJournalPool: Pool name that holds the CSI request name based journal
-	- volJournalPool: Pool name that holds the image/subvolume and the per-image journal (may be
-	  different if image is created in a topology constrained pool)
+  - csiJournalPool: Pool name that holds the CSI request name based journal
+  - volJournalPool: Pool name that holds the image/subvolume and the per-image journal (may be
+    different if image is created in a topology constrained pool)
 */
 func (conn *Connection) UndoReservation(ctx context.Context,
-	csiJournalPool, volJournalPool, volName, reqName string) error {
+	csiJournalPool, volJournalPool, volName, reqName string,
+) error {
 	// delete volume UUID omap (first, inverse of create order)
 
 	cj := conn.config
@@ -424,8 +453,8 @@ func (conn *Connection) UndoReservation(ctx context.Context,
 		}
 
 		imageUUID := volName[len(volName)-36:]
-		if valid := uuid.Parse(imageUUID); valid == nil {
-			return fmt.Errorf("failed parsing UUID in %s", volName)
+		if _, err := uuid.Parse(imageUUID); err != nil {
+			return fmt.Errorf("failed parsing UUID in %s: %w", volName, err)
 		}
 
 		err := util.RemoveObject(
@@ -437,7 +466,7 @@ func (conn *Connection) UndoReservation(ctx context.Context,
 			cj.cephUUIDDirectoryPrefix+imageUUID)
 		if err != nil {
 			if !errors.Is(err, util.ErrObjectNotFound) {
-				util.ErrorLog(ctx, "failed removing oMap %s (%s)", cj.cephUUIDDirectoryPrefix+imageUUID, err)
+				log.ErrorLog(ctx, "failed removing oMap %s (%s)", cj.cephUUIDDirectoryPrefix+imageUUID, err)
 
 				return err
 			}
@@ -448,7 +477,7 @@ func (conn *Connection) UndoReservation(ctx context.Context,
 	err := removeMapKeys(ctx, conn, csiJournalPool, cj.namespace, cj.csiDirectory,
 		[]string{cj.csiNameKeyPrefix + reqName})
 	if err != nil {
-		util.ErrorLog(ctx, "failed removing oMap key %s (%s)", cj.csiNameKeyPrefix+reqName, err)
+		log.ErrorLog(ctx, "failed removing oMap key %s (%s)", cj.csiNameKeyPrefix+reqName, err)
 
 		return err
 	}
@@ -466,7 +495,8 @@ func reserveOMapName(
 	ctx context.Context,
 	monitors string,
 	cr *util.Credentials,
-	pool, namespace, oMapNamePrefix, volUUID string) (string, error) {
+	pool, namespace, oMapNamePrefix, volUUID string,
+) (string, error) {
 	var iterUUID string
 
 	maxAttempts := 5
@@ -476,7 +506,7 @@ func reserveOMapName(
 			iterUUID = volUUID
 		} else {
 			// generate a uuid for the image name
-			iterUUID = uuid.NewUUID().String()
+			iterUUID = uuid.New().String()
 		}
 
 		err := util.CreateObject(ctx, monitors, cr, pool, namespace, oMapNamePrefix+iterUUID)
@@ -486,7 +516,7 @@ func reserveOMapName(
 			if volUUID == "" && errors.Is(err, util.ErrObjectExists) {
 				attempt++
 				// try again with a different uuid, for maxAttempts tries
-				util.DebugLog(ctx, "uuid (%s) conflict detected, retrying (attempt %d of %d)",
+				log.DebugLog(ctx, "uuid (%s) conflict detected, retrying (attempt %d of %d)",
 					iterUUID, attempt, maxAttempts)
 
 				continue
@@ -513,27 +543,32 @@ NOTE: As the function manipulates omaps, it should be called with a lock against
 held, to prevent parallel operations from modifying the state of the omaps for this request name.
 
 Input arguments:
-	- journalPool: Pool where the CSI journal is stored (maybe different than the pool where the
-	  image/subvolume is created due to topology constraints)
-	- journalPoolID: pool ID of the journalPool
-	- imagePool: Pool where the image/subvolume is created
-	- imagePoolID: pool ID of the imagePool
-	- reqName: Name of the volume request received
-	- namePrefix: Prefix to use when generating the image/subvolume name (suffix is an auto-generated UUID)
-	- parentName: Name of the parent image/subvolume if reservation is for a snapshot (optional)
-	- kmsConf: Name of the key management service used to encrypt the image (optional)
-	- volUUID: UUID need to be reserved instead of auto-generating one (this is useful for mirroring and metro-DR)
-	- owner: the owner of the volume (optional)
+  - journalPool: Pool where the CSI journal is stored (maybe different than the pool where the
+    image/subvolume is created due to topology constraints)
+  - journalPoolID: pool ID of the journalPool
+  - imagePool: Pool where the image/subvolume is created
+  - imagePoolID: pool ID of the imagePool
+  - reqName: Name of the volume request received
+  - namePrefix: Prefix to use when generating the image/subvolume name (suffix is an auto-generated UUID)
+  - parentName: Name of the parent image/subvolume if reservation is for a snapshot (optional)
+  - kmsConf: Name of the key management service used to encrypt the image (optional)
+  - encryptionType: Type of encryption used when kmsConf is set (optional)
+  - volUUID: UUID need to be reserved instead of auto-generating one (this is useful for mirroring and metro-DR)
+  - owner: the owner of the volume (optional)
+  - backingSnapshotID: ID of the snapshot on which the CephFS snapshot-backed volume is based (optional)
 
 Return values:
-	- string: Contains the UUID that was reserved for the passed in reqName
-	- string: Contains the image name that was reserved for the passed in reqName
-	- error: non-nil in case of any errors
+  - string: Contains the UUID that was reserved for the passed in reqName
+  - string: Contains the image name that was reserved for the passed in reqName
+  - error: non-nil in case of any errors
 */
 func (conn *Connection) ReserveName(ctx context.Context,
 	journalPool string, journalPoolID int64,
 	imagePool string, imagePoolID int64,
-	reqName, namePrefix, parentName, kmsConf, volUUID, owner string) (string, string, error) {
+	reqName, namePrefix, parentName, kmsConf, volUUID, owner,
+	backingSnapshotID string,
+	encryptionType util.EncryptionType,
+) (string, string, error) {
 	// TODO: Take in-arg as ImageAttributes?
 	var (
 		snapSource bool
@@ -590,10 +625,10 @@ func (conn *Connection) ReserveName(ctx context.Context,
 	}
 	defer func() {
 		if err != nil {
-			util.WarningLog(ctx, "reservation failed for volume: %s", reqName)
+			log.WarningLog(ctx, "reservation failed for volume: %s", reqName)
 			errDefer := conn.UndoReservation(ctx, imagePool, journalPool, imageName, reqName)
 			if errDefer != nil {
-				util.WarningLog(ctx, "failed undoing reservation of volume: %s (%v)", reqName, errDefer)
+				log.WarningLog(ctx, "failed undoing reservation of volume: %s (%v)", reqName, errDefer)
 			}
 		}
 	}()
@@ -613,6 +648,7 @@ func (conn *Connection) ReserveName(ctx context.Context,
 	// Update UUID directory to store encryption values
 	if kmsConf != "" {
 		omapValues[cj.encryptKMSKey] = kmsConf
+		omapValues[cj.encryptionType] = encryptionType.String()
 	}
 
 	// if owner is passed, set it in the UUID directory too
@@ -634,6 +670,11 @@ func (conn *Connection) ReserveName(ctx context.Context,
 		omapValues[cj.cephSnapSourceKey] = parentName
 	}
 
+	// Update backing snapshot ID for snapshot-backed CephFS volume
+	if backingSnapshotID != "" {
+		omapValues[cj.backingSnapshotIDKey] = backingSnapshotID
+	}
+
 	err = setOMapKeys(ctx, conn, journalPool, cj.namespace, oid, omapValues)
 	if err != nil {
 		return "", "", err
@@ -644,20 +685,24 @@ func (conn *Connection) ReserveName(ctx context.Context,
 
 // ImageAttributes contains all CSI stored image attributes, typically as OMap keys.
 type ImageAttributes struct {
-	RequestName   string // Contains the request name for the passed in UUID
-	SourceName    string // Contains the parent image name for the passed in UUID, if it is a snapshot
-	ImageName     string // Contains the image or subvolume name for the passed in UUID
-	KmsID         string // Contains encryption KMS, if it is an encrypted image
-	Owner         string // Contains the owner to be used in combination with KmsID (for some KMS)
-	ImageID       string // Contains the image id
-	JournalPoolID int64  // Pool ID of the CSI journal pool, stored in big endian format (on-disk data)
+	RequestName       string              // Contains the request name for the passed in UUID
+	SourceName        string              // Contains the parent image name for the passed in UUID, if it is a snapshot
+	ImageName         string              // Contains the image or subvolume name for the passed in UUID
+	KmsID             string              // Contains encryption KMS, if it is an encrypted image
+	EncryptionType    util.EncryptionType // Type of encryption used, if image encrypted
+	Owner             string              // Contains the owner to be used in combination with KmsID (for some KMS)
+	ImageID           string              // Contains the image id
+	GroupID           string              // Contains the group id of the image
+	JournalPoolID     int64               // Pool ID of the CSI journal pool, stored in big endian format (on-disk data)
+	BackingSnapshotID string              // ID of the snapshot on which the CephFS snapshot-backed volume is based
 }
 
 // GetImageAttributes fetches all keys and their values, from a UUID directory, returning ImageAttributes structure.
 func (conn *Connection) GetImageAttributes(
 	ctx context.Context,
 	pool, objectUUID string,
-	snapSource bool) (*ImageAttributes, error) {
+	snapSource bool,
+) (*ImageAttributes, error) {
 	var (
 		err             error
 		imageAttributes = &ImageAttributes{}
@@ -674,10 +719,13 @@ func (conn *Connection) GetImageAttributes(
 		cj.csiNameKey,
 		cj.csiImageKey,
 		cj.encryptKMSKey,
+		cj.encryptionType,
 		cj.csiJournalPool,
 		cj.cephSnapSourceKey,
 		cj.csiImageIDKey,
 		cj.ownerKey,
+		cj.backingSnapshotIDKey,
+		cj.csiGroupIDKey,
 	}
 	values, err := getOMapValues(
 		ctx, conn, pool, cj.namespace, cj.cephUUIDDirectoryPrefix+objectUUID,
@@ -686,14 +734,17 @@ func (conn *Connection) GetImageAttributes(
 		if !errors.Is(err, util.ErrKeyNotFound) && !errors.Is(err, util.ErrPoolNotFound) {
 			return nil, err
 		}
-		util.WarningLog(ctx, "unable to read omap keys: pool or key missing: %v", err)
+		log.WarningLog(ctx, "unable to read omap keys: pool or key missing: %v", err)
 	}
 
 	var found bool
 	imageAttributes.RequestName = values[cj.csiNameKey]
 	imageAttributes.KmsID = values[cj.encryptKMSKey]
+	imageAttributes.EncryptionType = util.ParseEncryptionType(values[cj.encryptionType])
 	imageAttributes.Owner = values[cj.ownerKey]
 	imageAttributes.ImageID = values[cj.csiImageIDKey]
+	imageAttributes.BackingSnapshotID = values[cj.backingSnapshotIDKey]
+	imageAttributes.GroupID = values[cj.csiGroupIDKey]
 
 	// image key was added at a later point, so not all volumes will have this
 	// key set when ceph-csi was upgraded
@@ -741,6 +792,47 @@ func (conn *Connection) StoreImageID(ctx context.Context, pool, reservedUUID, im
 	return nil
 }
 
+// StoreAttribute stores an attribute (key/value) in omap.
+func (conn *Connection) StoreAttribute(ctx context.Context, pool, reservedUUID, attribute, value string) error {
+	key := conn.config.commonPrefix + attribute
+	err := setOMapKeys(ctx, conn, pool, conn.config.namespace, conn.config.cephUUIDDirectoryPrefix+reservedUUID,
+		map[string]string{key: value})
+	if err != nil {
+		return fmt.Errorf("failed to set key %q to %q: %w", key, value, err)
+	}
+
+	return nil
+}
+
+// StoreGroupID stores an groupID in omap.
+func (conn *Connection) StoreGroupID(ctx context.Context, pool, reservedUUID, groupID string) error {
+	err := setOMapKeys(ctx, conn, pool, conn.config.namespace, conn.config.cephUUIDDirectoryPrefix+reservedUUID,
+		map[string]string{conn.config.csiGroupIDKey: groupID})
+	if err != nil {
+		return fmt.Errorf("failed to store groupID %w", err)
+	}
+
+	return nil
+}
+
+// FetchAttribute fetches an attribute (key) in omap.
+func (conn *Connection) FetchAttribute(ctx context.Context, pool, reservedUUID, attribute string) (string, error) {
+	key := conn.config.commonPrefix + attribute
+	values, err := getOMapValues(
+		ctx, conn, pool, conn.config.namespace, conn.config.cephUUIDDirectoryPrefix+reservedUUID,
+		conn.config.commonPrefix, []string{key})
+	if err != nil {
+		return "", fmt.Errorf("failed to get values for key %q from OMAP: %w", key, err)
+	}
+
+	value, ok := values[key]
+	if !ok {
+		return "", fmt.Errorf("failed to find key %q in returned map: %v", key, values)
+	}
+
+	return value, nil
+}
+
 // Destroy frees any resources and invalidates the journal connection.
 func (conn *Connection) Destroy() {
 	// invalidate cluster connection metadata
@@ -751,7 +843,8 @@ func (conn *Connection) Destroy() {
 // CheckNewUUIDMapping checks is there any UUID mapping between old
 // volumeHandle and the newly generated volumeHandle.
 func (conn *Connection) CheckNewUUIDMapping(ctx context.Context,
-	journalPool, volumeHandle string) (string, error) {
+	journalPool, volumeHandle string,
+) (string, error) {
 	cj := conn.config
 
 	// check if request name is already part of the directory omap
@@ -781,7 +874,8 @@ func (conn *Connection) CheckNewUUIDMapping(ctx context.Context,
 // secondary cluster cephcsi will generate the new mapping and keep it for
 // internal reference.
 func (conn *Connection) ReserveNewUUIDMapping(ctx context.Context,
-	journalPool, oldVolumeHandle, newVolumeHandle string) error {
+	journalPool, oldVolumeHandle, newVolumeHandle string,
+) error {
 	cj := conn.config
 
 	setKeys := map[string]string{
@@ -789,4 +883,10 @@ func (conn *Connection) ReserveNewUUIDMapping(ctx context.Context,
 	}
 
 	return setOMapKeys(ctx, conn, journalPool, cj.namespace, cj.csiDirectory, setKeys)
+}
+
+// ResetVolumeOwner updates the owner in the rados object.
+func (conn *Connection) ResetVolumeOwner(ctx context.Context, pool, reservedUUID, owner string) error {
+	return setOMapKeys(ctx, conn, pool, conn.config.namespace, conn.config.cephUUIDDirectoryPrefix+reservedUUID,
+		map[string]string{conn.config.ownerKey: owner})
 }

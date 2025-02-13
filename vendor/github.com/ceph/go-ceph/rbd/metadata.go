@@ -15,14 +15,15 @@ import (
 // GetMetadata returns the metadata string associated with the given key.
 //
 // Implements:
-//  int rbd_metadata_get(rbd_image_t image, const char *key, char *value, size_t *vallen)
+//
+//	int rbd_metadata_get(rbd_image_t image, const char *key, char *value, size_t *vallen)
 func (image *Image) GetMetadata(key string) (string, error) {
 	if err := image.validate(imageIsOpen); err != nil {
 		return "", err
 	}
 
-	c_key := C.CString(key)
-	defer C.free(unsafe.Pointer(c_key))
+	cKey := C.CString(key)
+	defer C.free(unsafe.Pointer(cKey))
 
 	var (
 		buf []byte
@@ -34,7 +35,7 @@ func (image *Image) GetMetadata(key string) (string, error) {
 		// rbd_metadata_get is a bit quirky and *does not* update the size
 		// value if the size passed in >= the needed size.
 		ret := C.rbd_metadata_get(
-			image.image, c_key, (*C.char)(unsafe.Pointer(&buf[0])), &csize)
+			image.image, cKey, (*C.char)(unsafe.Pointer(&buf[0])), &csize)
 		err = getError(ret)
 		return retry.Size(int(csize)).If(err == errRange)
 	})
@@ -47,20 +48,21 @@ func (image *Image) GetMetadata(key string) (string, error) {
 // SetMetadata updates the metadata string associated with the given key.
 //
 // Implements:
-//  int rbd_metadata_set(rbd_image_t image, const char *key, const char *value)
+//
+//	int rbd_metadata_set(rbd_image_t image, const char *key, const char *value)
 func (image *Image) SetMetadata(key string, value string) error {
 	if err := image.validate(imageIsOpen); err != nil {
 		return err
 	}
 
-	c_key := C.CString(key)
-	c_value := C.CString(value)
-	defer C.free(unsafe.Pointer(c_key))
-	defer C.free(unsafe.Pointer(c_value))
+	cKey := C.CString(key)
+	cValue := C.CString(value)
+	defer C.free(unsafe.Pointer(cKey))
+	defer C.free(unsafe.Pointer(cValue))
 
-	ret := C.rbd_metadata_set(image.image, c_key, c_value)
+	ret := C.rbd_metadata_set(image.image, cKey, cValue)
 	if ret < 0 {
-		return rbdError(ret)
+		return getError(ret)
 	}
 
 	return nil
@@ -69,18 +71,19 @@ func (image *Image) SetMetadata(key string, value string) error {
 // RemoveMetadata clears the metadata associated with the given key.
 //
 // Implements:
-//  int rbd_metadata_remove(rbd_image_t image, const char *key)
+//
+//	int rbd_metadata_remove(rbd_image_t image, const char *key)
 func (image *Image) RemoveMetadata(key string) error {
 	if err := image.validate(imageIsOpen); err != nil {
 		return err
 	}
 
-	c_key := C.CString(key)
-	defer C.free(unsafe.Pointer(c_key))
+	cKey := C.CString(key)
+	defer C.free(unsafe.Pointer(cKey))
 
-	ret := C.rbd_metadata_remove(image.image, c_key)
+	ret := C.rbd_metadata_remove(image.image, cKey)
 	if ret < 0 {
-		return rbdError(ret)
+		return getError(ret)
 	}
 
 	return nil
@@ -89,8 +92,9 @@ func (image *Image) RemoveMetadata(key string) error {
 // ListMetadata returns a map containing all metadata assigned to the RBD image.
 //
 // Implements:
-//  int rbd_metadata_list(rbd_image_t image, const char *start, uint64_t max,
-//                        char *keys, size_t *key_len, char *values, size_t *vals_len);
+//
+//	int rbd_metadata_list(rbd_image_t image, const char *start, uint64_t max,
+//	                      char *keys, size_t *key_len, char *values, size_t *vals_len);
 func (image *Image) ListMetadata() (map[string]string, error) {
 	if err := image.validate(imageIsOpen); err != nil {
 		return nil, err

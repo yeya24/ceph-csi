@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Ceph-CSI Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2e
 
 import (
@@ -5,16 +21,15 @@ import (
 	"fmt"
 	"strings"
 
-	. "github.com/onsi/gomega" // nolint
+	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
+	"k8s.io/kubernetes/test/e2e/framework"
 )
 
 var (
 	vaultExamplePath     = "../examples/kms/vault/"
 	vaultServicePath     = "vault.yaml"
-	vaultPSPPath         = "vault-psp.yaml"
 	vaultRBACPath        = "csi-vaulttokenreview-rbac.yaml"
 	vaultConfigPath      = "kms-config.yaml"
 	vaultTenantPath      = "tenant-sa.yaml"
@@ -32,7 +47,7 @@ func deployVault(c kubernetes.Interface, deployTimeout int) {
 		"cm",
 		"ceph-csi-encryption-kms-config",
 		"--ignore-not-found=true")
-	Expect(err).Should(BeNil())
+	Expect(err).ShouldNot(HaveOccurred())
 
 	createORDeleteVault(kubectlCreate)
 	opt := metav1.ListOptions{
@@ -40,11 +55,11 @@ func deployVault(c kubernetes.Interface, deployTimeout int) {
 	}
 
 	pods, err := c.CoreV1().Pods(cephCSINamespace).List(context.TODO(), opt)
-	Expect(err).Should(BeNil())
-	Expect(len(pods.Items)).Should(Equal(1))
+	Expect(err).ShouldNot(HaveOccurred())
+	Expect(pods.Items).Should(HaveLen(1))
 	name := pods.Items[0].Name
 	err = waitForPodInRunningState(name, cephCSINamespace, c, deployTimeout, noError)
-	Expect(err).Should(BeNil())
+	Expect(err).ShouldNot(HaveOccurred())
 }
 
 func deleteVault() {
@@ -54,7 +69,7 @@ func deleteVault() {
 func createORDeleteVault(action kubectlAction) {
 	data, err := replaceNamespaceInTemplate(vaultExamplePath + vaultServicePath)
 	if err != nil {
-		e2elog.Failf("failed to read content from %s %v", vaultExamplePath+vaultServicePath, err)
+		framework.Failf("failed to read content from %s %v", vaultExamplePath+vaultServicePath, err)
 	}
 
 	data = strings.ReplaceAll(data, "vault.default", "vault."+cephCSINamespace)
@@ -62,35 +77,26 @@ func createORDeleteVault(action kubectlAction) {
 	data = strings.ReplaceAll(data, "value: default", "value: "+cephCSINamespace)
 	err = retryKubectlInput(cephCSINamespace, action, data, deployTimeout)
 	if err != nil {
-		e2elog.Failf("failed to %s vault statefulset %v", action, err)
+		framework.Failf("failed to %s vault statefulset %v", action, err)
 	}
 
 	data, err = replaceNamespaceInTemplate(vaultExamplePath + vaultRBACPath)
 	if err != nil {
-		e2elog.Failf("failed to read content from %s %v", vaultExamplePath+vaultRBACPath, err)
+		framework.Failf("failed to read content from %s %v", vaultExamplePath+vaultRBACPath, err)
 	}
 	err = retryKubectlInput(cephCSINamespace, action, data, deployTimeout)
 	if err != nil {
-		e2elog.Failf("failed to %s vault statefulset %v", action, err)
+		framework.Failf("failed to %s vault statefulset %v", action, err)
 	}
 
 	data, err = replaceNamespaceInTemplate(vaultExamplePath + vaultConfigPath)
 	if err != nil {
-		e2elog.Failf("failed to read content from %s %v", vaultExamplePath+vaultConfigPath, err)
+		framework.Failf("failed to read content from %s %v", vaultExamplePath+vaultConfigPath, err)
 	}
 	data = strings.ReplaceAll(data, "default", cephCSINamespace)
 	err = retryKubectlInput(cephCSINamespace, action, data, deployTimeout)
 	if err != nil {
-		e2elog.Failf("failed to %s vault configmap %v", action, err)
-	}
-
-	data, err = replaceNamespaceInTemplate(vaultExamplePath + vaultPSPPath)
-	if err != nil {
-		e2elog.Failf("failed to read content from %s %v", vaultExamplePath+vaultPSPPath, err)
-	}
-	err = retryKubectlInput(cephCSINamespace, action, data, deployTimeout)
-	if err != nil {
-		e2elog.Failf("failed to %s vault psp %v", action, err)
+		framework.Failf("failed to %s vault configmap %v", action, err)
 	}
 }
 
@@ -117,7 +123,7 @@ func createTenantServiceAccount(c kubernetes.Interface, ns string) error {
 // were created with createTenantServiceAccount.
 func deleteTenantServiceAccount(ns string) {
 	err := createORDeleteTenantServiceAccount(kubectlDelete, ns)
-	Expect(err).Should(BeNil())
+	Expect(err).ShouldNot(HaveOccurred())
 }
 
 // createORDeleteTenantServiceAccount is a helper that reads the tenant-sa.yaml

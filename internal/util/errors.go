@@ -18,7 +18,6 @@ package util
 
 import (
 	"errors"
-	"fmt"
 )
 
 var (
@@ -33,29 +32,8 @@ var (
 	ErrSnapNameConflict = errors.New("snapshot name conflict")
 	// ErrPoolNotFound is returned when pool is not found.
 	ErrPoolNotFound = errors.New("pool not found")
+	// ErrClusterIDNotSet is returned when cluster id is not set.
+	ErrClusterIDNotSet = errors.New("clusterID must be set")
+	// ErrMissingConfigForMonitor is returned when clusterID is not found for the mon.
+	ErrMissingConfigForMonitor = errors.New("missing configuration of cluster ID for monitor")
 )
-
-type errorPair struct {
-	first  error
-	second error
-}
-
-func (e errorPair) Error() string {
-	return fmt.Sprintf("%v: %v", e.first, e.second)
-}
-
-// Is checks if target error is wrapped in the first error.
-func (e errorPair) Is(target error) bool {
-	return errors.Is(e.first, target)
-}
-
-// Unwrap returns the second error.
-func (e errorPair) Unwrap() error {
-	return e.second
-}
-
-// JoinErrors combines two errors. Of the returned error, Is() follows the first
-// branch, Unwrap() follows the second branch.
-func JoinErrors(e1, e2 error) error {
-	return errorPair{e1, e2}
-}

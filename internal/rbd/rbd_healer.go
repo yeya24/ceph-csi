@@ -18,9 +18,15 @@ package rbd
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"path/filepath"
 	"sync"
 
 	"github.com/ceph/ceph-csi/internal/util"
+	kubeclient "github.com/ceph/ceph-csi/internal/util/k8s"
+	"github.com/ceph/ceph-csi/internal/util/log"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	v1 "k8s.io/api/core/v1"
@@ -56,7 +62,7 @@ func getSecret(c *k8s.Clientset, ns, name string) (map[string]string, error) {
 
 	secret, err := c.CoreV1().Secrets(ns).Get(context.TODO(), name, metav1.GetOptions{})
 	if err != nil {
-		util.ErrorLogMsg("get secret failed, err: %v", err)
+		log.ErrorLogMsg("get secret failed, err: %v", err)
 
 		return nil, err
 	}
@@ -68,20 +74,48 @@ func getSecret(c *k8s.Clientset, ns, name string) (map[string]string, error) {
 	return deviceSecret, nil
 }
 
+// formatStagingTargetPath returns the path where the volume is expected to be
+// mounted (or the block-device is attached/mapped). Different Kubernetes
+// version use different paths.
+func formatStagingTargetPath(c *k8s.Clientset, pv *v1.PersistentVolume, stagingPath string) (string, error) {
+	// Kubernetes 1.24+ uses a hash of the volume-id in the path name
+	unique := sha256.Sum256([]byte(pv.Spec.CSI.VolumeHandle))
+	targetPath := filepath.Join(stagingPath, pv.Spec.CSI.Driver, hex.EncodeToString(unique[:]), "globalmount")
+
+	major, minor, err := kubeclient.GetServerVersion(c)
+	if err != nil {
+		return "", fmt.Errorf("failed to get server version: %w", err)
+	}
+
+	// 'encode' major/minor in a single integer
+	legacyVersion := 1024 // Kubernetes 1.24 => 1 * 1000 + 24
+	if ((major * 1000) + minor) < (legacyVersion) {
+		// path in Kubernetes < 1.24
+		targetPath = filepath.Join(stagingPath, "pv", pv.Name, "globalmount")
+	}
+
+	return targetPath, nil
+}
+
 func callNodeStageVolume(ns *NodeServer, c *k8s.Clientset, pv *v1.PersistentVolume, stagingPath string) error {
 	publishContext := make(map[string]string)
 
 	volID := pv.Spec.PersistentVolumeSource.CSI.VolumeHandle
-	stagingParentPath := stagingPath + pv.Name + "/globalmount"
+	stagingParentPath, err := formatStagingTargetPath(c, pv, stagingPath)
+	if err != nil {
+		log.ErrorLogMsg("formatStagingTargetPath failed volID: %s, err: %v", volID, err)
 
-	util.DefaultLog("sending nodeStageVolume for volID: %s, stagingPath: %s",
+		return err
+	}
+
+	log.DefaultLog("sending nodeStageVolume for volID: %s, stagingPath: %s",
 		volID, stagingParentPath)
 
 	deviceSecret, err := getSecret(c,
 		pv.Spec.PersistentVolumeSource.CSI.NodeStageSecretRef.Namespace,
 		pv.Spec.PersistentVolumeSource.CSI.NodeStageSecretRef.Name)
 	if err != nil {
-		util.ErrorLogMsg("getSecret failed for volID: %s, err: %v", volID, err)
+		log.ErrorLogMsg("getSecret failed for volID: %s, err: %v", volID, err)
 
 		return err
 	}
@@ -116,7 +150,7 @@ func callNodeStageVolume(ns *NodeServer, c *k8s.Clientset, pv *v1.PersistentVolu
 
 	_, err = ns.NodeStageVolume(context.TODO(), req)
 	if err != nil {
-		util.ErrorLogMsg("nodeStageVolume request failed, volID: %s, stagingPath: %s, err: %v",
+		log.ErrorLogMsg("nodeStageVolume request failed, volID: %s, stagingPath: %s, err: %v",
 			volID, stagingParentPath, err)
 
 		return err
@@ -125,12 +159,18 @@ func callNodeStageVolume(ns *NodeServer, c *k8s.Clientset, pv *v1.PersistentVolu
 	return nil
 }
 
-// runVolumeHealer heal the volumes attached on a node.
-func runVolumeHealer(ns *NodeServer, conf *util.Config) error {
-	c := util.NewK8sClient()
+// RunVolumeHealer heal the volumes attached on a node.
+func RunVolumeHealer(ns *NodeServer, conf *util.Config) error {
+	c, err := kubeclient.NewK8sClient()
+	if err != nil {
+		log.ErrorLogMsg("failed to connect to Kubernetes: %v", err)
+
+		return err
+	}
+
 	val, err := c.StorageV1().VolumeAttachments().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
-		util.ErrorLogMsg("list volumeAttachments failed, err: %v", err)
+		log.ErrorLogMsg("list volumeAttachments failed, err: %v", err)
 
 		return err
 	}
@@ -147,14 +187,17 @@ func runVolumeHealer(ns *NodeServer, conf *util.Config) error {
 		if err != nil {
 			// skip if volume doesn't exist
 			if !apierrors.IsNotFound(err) {
-				util.ErrorLogMsg("get persistentVolumes failed for pv: %s, err: %v", pvName, err)
+				log.ErrorLogMsg("get persistentVolumes failed for pv: %s, err: %v", pvName, err)
 			}
 
 			continue
 		}
-		// TODO: check with pv delete annotations, for eg: what happens when the pv is marked for delete
-		// skip this volumeattachment if its pv is not bound
-		if pv.Status.Phase != v1.VolumeBound {
+		// skip this volumeattachment if its pv is not bound or marked for deletion
+		if pv.Status.Phase != v1.VolumeBound || pv.DeletionTimestamp != nil {
+			continue
+		}
+
+		if pv.Spec.PersistentVolumeSource.CSI == nil {
 			continue
 		}
 		// skip if mounter is not rbd-nbd
@@ -167,7 +210,7 @@ func runVolumeHealer(ns *NodeServer, conf *util.Config) error {
 		if err != nil {
 			// skip if volume attachment doesn't exist
 			if !apierrors.IsNotFound(err) {
-				util.ErrorLogMsg("get volumeAttachments failed for volumeAttachment: %s, volID: %s, err: %v",
+				log.ErrorLogMsg("get volumeAttachments failed for volumeAttachment: %s, volID: %s, err: %v",
 					val.Items[i].Name, pv.Spec.PersistentVolumeSource.CSI.VolumeHandle, err)
 			}
 
@@ -192,7 +235,7 @@ func runVolumeHealer(ns *NodeServer, conf *util.Config) error {
 
 	for s := range channel {
 		if s != nil {
-			util.ErrorLogMsg("callNodeStageVolume failed, err: %v", s)
+			log.ErrorLogMsg("callNodeStageVolume failed, err: %v", s)
 		}
 	}
 

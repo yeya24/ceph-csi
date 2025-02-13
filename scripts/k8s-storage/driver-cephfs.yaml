@@ -6,7 +6,7 @@ StorageClass:
 
 SnapshotClass:
   # Must be set to enable snapshotting tests
-  FromName: false
+  FromExistingClassName: k8s-storage-e2e-cephfs
 
 DriverInfo:
   # Internal name of the driver, display name in the test case and test objects
@@ -34,7 +34,19 @@ DriverInfo:
     persistence: true
 
     # Volume ownership via fsGroup
-    fsGroup: true
+    fsGroup: false
+
+    # multiple pods on a node can use the same volume concurrently
+    multipods: true
+
+    # support online expansion
+    onlineExpansion: true
+
+    # supports ReadWriteOncePod pod
+    readWriteOncePod: true
+
+    # supports ROX AccessMode in PVC
+    capReadOnlyMany: true
 
     # Raw block mode
     block: false
@@ -46,7 +58,7 @@ DriverInfo:
     volumeLimits: false
 
     # Support for volume expansion in controllers
-    controllerExpansion: false
+    controllerExpansion: true
 
     # Support for volume expansion in nodes
     nodeExpansion: false
@@ -61,7 +73,7 @@ DriverInfo:
     topology: false
 
     # Support populate data from snapshot
-    snapshotDataSource: false
+    snapshotDataSource: true
 
     # Support populated data from PVC
-    pvcDataSource: false
+    pvcDataSource: true

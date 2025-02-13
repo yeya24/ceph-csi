@@ -14,6 +14,8 @@ import (
 
 var argvPlaceholder = "placeholder"
 
+//revive:disable:var-naming old-yet-exported public api
+
 // ClusterStat represents Ceph cluster statistics.
 type ClusterStat struct {
 	Kb          uint64
@@ -21,6 +23,8 @@ type ClusterStat struct {
 	Kb_avail    uint64
 	Num_objects uint64
 }
+
+//revive:enable:var-naming
 
 // Conn is a connection handle to a Ceph cluster.
 type Conn struct {
@@ -67,7 +71,7 @@ func (c *Conn) Connect() error {
 
 // Shutdown disconnects from the cluster.
 func (c *Conn) Shutdown() {
-	if err := c.ensure_connected(); err != nil {
+	if err := c.ensureConnected(); err != nil {
 		return
 	}
 	freeConn(c)
@@ -91,12 +95,13 @@ func (c *Conn) ReadDefaultConfigFile() error {
 // OpenIOContext creates and returns a new IOContext for the given pool.
 //
 // Implements:
-//  int rados_ioctx_create(rados_t cluster, const char *pool_name,
-//                         rados_ioctx_t *ioctx);
+//
+//	int rados_ioctx_create(rados_t cluster, const char *pool_name,
+//	                       rados_ioctx_t *ioctx);
 func (c *Conn) OpenIOContext(pool string) (*IOContext, error) {
 	cPool := C.CString(pool)
 	defer C.free(unsafe.Pointer(cPool))
-	ioctx := &IOContext{}
+	ioctx := &IOContext{conn: c}
 	ret := C.rados_ioctx_create(c.cluster, cPool, &ioctx.ioctx)
 	if ret == 0 {
 		return ioctx, nil
@@ -166,7 +171,7 @@ func (c *Conn) WaitForLatestOSDMap() error {
 	return getError(ret)
 }
 
-func (c *Conn) ensure_connected() error {
+func (c *Conn) ensureConnected() error {
 	if c.connected {
 		return nil
 	}
@@ -176,7 +181,7 @@ func (c *Conn) ensure_connected() error {
 // GetClusterStats returns statistics about the cluster associated with the
 // connection.
 func (c *Conn) GetClusterStats() (stat ClusterStat, err error) {
-	if err := c.ensure_connected(); err != nil {
+	if err := c.ensureConnected(); err != nil {
 		return ClusterStat{}, err
 	}
 	cStat := C.struct_rados_cluster_stat_t{}
@@ -196,8 +201,9 @@ func (c *Conn) GetClusterStats() (stat ClusterStat, err error) {
 // argument vector.
 //
 // Implements:
-//  int rados_conf_parse_argv(rados_t cluster, int argc,
-//                            const char **argv);
+//
+//	int rados_conf_parse_argv(rados_t cluster, int argc,
+//	                          const char **argv);
 func (c *Conn) ParseConfigArgv(argv []string) error {
 	if c.cluster == nil {
 		return ErrNotConnected
@@ -269,7 +275,7 @@ func (c *Conn) MakePool(name string) error {
 
 // DeletePool deletes a pool and all the data inside the pool.
 func (c *Conn) DeletePool(name string) error {
-	if err := c.ensure_connected(); err != nil {
+	if err := c.ensureConnected(); err != nil {
 		return err
 	}
 	cName := C.CString(name)
@@ -280,28 +286,28 @@ func (c *Conn) DeletePool(name string) error {
 
 // GetPoolByName returns the ID of the pool with a given name.
 func (c *Conn) GetPoolByName(name string) (int64, error) {
-	if err := c.ensure_connected(); err != nil {
+	if err := c.ensureConnected(); err != nil {
 		return 0, err
 	}
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
-	ret := int64(C.rados_pool_lookup(c.cluster, cName))
+	ret := C.rados_pool_lookup(c.cluster, cName)
 	if ret < 0 {
-		return 0, radosError(ret)
+		return 0, getError(C.int(ret))
 	}
-	return ret, nil
+	return int64(ret), nil
 }
 
 // GetPoolByID returns the name of a pool by a given ID.
 func (c *Conn) GetPoolByID(id int64) (string, error) {
 	buf := make([]byte, 4096)
-	if err := c.ensure_connected(); err != nil {
+	if err := c.ensureConnected(); err != nil {
 		return "", err
 	}
 	cid := C.int64_t(id)
-	ret := int(C.rados_pool_reverse_lookup(c.cluster, cid, (*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf))))
+	ret := C.rados_pool_reverse_lookup(c.cluster, cid, (*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
 	if ret < 0 {
-		return "", radosError(ret)
+		return "", getError(ret)
 	}
 	return C.GoString((*C.char)(unsafe.Pointer(&buf[0]))), nil
 }

@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"fmt"
 	"net/http"
+	"net/http/pprof"
 	"sort"
 	"strings"
 	"time"
@@ -99,6 +100,12 @@ type CSIMetricsManager interface {
 	// RegisterToServer registers an HTTP handler for this metrics manager to the
 	// given server at the specified address/path.
 	RegisterToServer(s Server, metricsPath string)
+
+	// RegisterPprofToServer registers the HTTP handlers necessary to enable pprof
+	// for this metrics manager to the given server at the usual path.
+	// This function is not needed when using DefaultServeMux as the Server since
+	// the handlers will automatically be registered when importing pprof.
+	RegisterPprofToServer(s Server)
 }
 
 // Server represents any type that could serve HTTP requests for the metrics
@@ -179,12 +186,20 @@ func WithProcessStartTime(registerProcessStartTime bool) MetricsManagerOption {
 	}
 }
 
+// WithCustomRegistry allow user to use custom pre-created registry instead of a new created one.
+func WithCustomRegistry(registry metrics.KubeRegistry) MetricsManagerOption {
+	return func(cmm *csiMetricsManager) {
+		cmm.registry = registry
+	}
+}
+
 // NewCSIMetricsManagerForSidecar creates and registers metrics for CSI Sidecars and
 // returns an object that can be used to trigger the metrics. It uses "csi_sidecar"
 // as subsystem.
 //
 // driverName - Name of the CSI driver against which this operation was executed.
-//              If unknown, leave empty, and use SetDriverName method to update later.
+//
+//	If unknown, leave empty, and use SetDriverName method to update later.
 func NewCSIMetricsManagerForSidecar(driverName string) CSIMetricsManager {
 	return NewCSIMetricsManagerWithOptions(driverName)
 }
@@ -197,7 +212,8 @@ var NewCSIMetricsManager = NewCSIMetricsManagerForSidecar
 // as subsystem.
 //
 // driverName - Name of the CSI driver against which this operation was executed.
-//              If unknown, leave empty, and use SetDriverName method to update later.
+//
+//	If unknown, leave empty, and use SetDriverName method to update later.
 func NewCSIMetricsManagerForPlugin(driverName string) CSIMetricsManager {
 	return NewCSIMetricsManagerWithOptions(driverName,
 		WithSubsystem(SubsystemPlugin),
@@ -208,7 +224,8 @@ func NewCSIMetricsManagerForPlugin(driverName string) CSIMetricsManager {
 // if there are special needs like changing the default subsystems.
 //
 // driverName - Name of the CSI driver against which this operation was executed.
-//              If unknown, leave empty, and use SetDriverName method to update later.
+//
+//	If unknown, leave empty, and use SetDriverName method to update later.
 func NewCSIMetricsManagerWithOptions(driverName string, options ...MetricsManagerOption) CSIMetricsManager {
 	cmm := csiMetricsManager{
 		registry:                 metrics.NewKubeRegistry(),
@@ -376,6 +393,20 @@ func (cmm *csiMetricsManager) RegisterToServer(s Server, metricsPath string) {
 		cmm.GetRegistry(),
 		metrics.HandlerOpts{
 			ErrorHandling: metrics.ContinueOnError}))
+}
+
+// RegisterPprofToServer registers the HTTP handlers necessary to enable pprof
+// for this metrics manager to the given server at the usual path.
+// This function is not needed when using DefaultServeMux as the Server since
+// the handlers will automatically be registered when importing pprof.
+func (cmm *csiMetricsManager) RegisterPprofToServer(s Server) {
+	// Needed handlers can be seen here:
+	// https://github.com/golang/go/blob/master/src/net/http/pprof/pprof.go#L27
+	s.Handle("/debug/pprof/", http.HandlerFunc(pprof.Index))
+	s.Handle("/debug/pprof/cmdline", http.HandlerFunc(pprof.Cmdline))
+	s.Handle("/debug/pprof/profile", http.HandlerFunc(pprof.Profile))
+	s.Handle("/debug/pprof/symbol", http.HandlerFunc(pprof.Symbol))
+	s.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
 }
 
 // VerifyMetricsMatch is a helper function that verifies that the expected and

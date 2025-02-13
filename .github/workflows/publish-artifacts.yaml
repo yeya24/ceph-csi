@@ -9,27 +9,29 @@ on:
       - devel
       # Push events to branches matching refs/heads/release-v*
       - 'release-v*'
+permissions:
+  contents: read
+
 jobs:
   push:
     name: Publish artifacts
     runs-on: ubuntu-latest
     if: github.repository == 'ceph/ceph-csi'
     steps:
-      - uses: actions/checkout@v2
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
       - name: Login to Quay
-        uses: docker/login-action@v1
+        # yamllint disable-line rule:line-length
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567  # v3.3.0
         with:
           registry: quay.io
           username: ${{ secrets.QUAY_IO_USERNAME }}
           password: ${{ secrets.QUAY_IO_PASSWORD }}
 
-      - name: Set build environment based on Git branch name
-        if: github.ref == 'refs/heads/devel'
-        run: echo "BRANCH_NAME=devel" >> $GITHUB_ENV
-
       - name: Set build environment variables
         run: |
+          echo "BRANCH_NAME=${GITHUB_REF##*/}" >> $GITHUB_ENV
           echo "GITHUB_USER=${{ secrets.CEPH_CSI_BOT_NAME }}" >> $GITHUB_ENV
           echo "GITHUB_EMAIL=${{ secrets.CEPH_CSI_BOT_EMAIL }}" >> $GITHUB_ENV
           echo "GITHUB_TOKEN=${{ secrets.CEPH_CSI_BOT_TOKEN }}" >> $GITHUB_ENV

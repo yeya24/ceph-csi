@@ -32,6 +32,11 @@ ifeq ($(HAVE_CPUSET),1)
     CPUSET ?= --cpuset-cpus=0-${CPUS}
 endif
 
+ifneq ($(GITHUB_ACTION),)
+    # see https://github.com/containers/podman/issues/21012
+    SECURITY_OPT ?= --security-opt seccomp=unconfined
+endif
+
 CSI_IMAGE_NAME=$(if $(ENV_CSI_IMAGE_NAME),$(ENV_CSI_IMAGE_NAME),quay.io/cephcsi/cephcsi)
 CSI_IMAGE_VERSION=$(shell . $(CURDIR)/build.env ; echo $${CSI_IMAGE_VERSION})
 CSI_IMAGE=$(CSI_IMAGE_NAME):$(CSI_IMAGE_VERSION)
@@ -46,21 +51,18 @@ endif
 
 GO_PROJECT=github.com/ceph/ceph-csi
 
+CEPH_VERSION ?= $(shell . $(CURDIR)/build.env ; echo $${CEPH_VERSION})
+# TODO: ceph_preview tag required for FSQuiesce API
+GO_TAGS_LIST ?= $(CEPH_VERSION) ceph_preview
+
 # go build flags
 LDFLAGS ?=
 LDFLAGS += -X $(GO_PROJECT)/internal/util.GitCommit=$(GIT_COMMIT)
 # CSI_IMAGE_VERSION will be considered as the driver version
 LDFLAGS += -X $(GO_PROJECT)/internal/util.DriverVersion=$(CSI_IMAGE_VERSION)
+GO_TAGS ?= -tags=$(shell echo $(GO_TAGS_LIST) | tr ' ' ',')
 
 BASE_IMAGE ?= $(shell . $(CURDIR)/build.env ; echo $${BASE_IMAGE})
-
-ifndef CEPH_VERSION
-	CEPH_VERSION = $(shell . $(CURDIR)/build.env ; echo $${CEPH_VERSION})
-endif
-ifdef CEPH_VERSION
-	# pass -tags to go commands (for go-ceph build constraints)
-	GO_TAGS = -tags=$(CEPH_VERSION)
-endif
 
 # passing TARGET=static-check on the 'make containerized-test' or 'make
 # containerized-build' commandline will run the selected target instead of
@@ -87,7 +89,7 @@ endif
 
 all: cephcsi
 
-.PHONY: go-test static-check mod-check go-lint lint-extras gosec commitlint codespell
+.PHONY: go-test static-check mod-check go-lint lint-extras commitlint codespell
 ifeq ($(CONTAINERIZED),no)
 # include mod-check in non-containerized runs
 test: go-test static-check mod-check
@@ -95,19 +97,28 @@ else
 # exclude mod-check for containerized runs (CI runs it separately)
 test: go-test static-check
 endif
-static-check: check-env codespell go-lint lint-extras gosec
+static-check: check-env codespell go-lint lint-extras
 
 go-test: TEST_COVERAGE ?= $(shell . $(CURDIR)/build.env ; echo $${TEST_COVERAGE})
 go-test: GO_COVER_DIR ?= $(shell . $(CURDIR)/build.env ; echo $${GO_COVER_DIR})
 go-test: check-env
 	TEST_COVERAGE="$(TEST_COVERAGE)" GO_COVER_DIR="$(GO_COVER_DIR)" GO_TAGS="$(GO_TAGS)" ./scripts/test-go.sh
 
+go-test-api: check-env
+	@pushd api && ../scripts/test-go.sh && popd
+
 mod-check: check-env
 	@echo 'running: go mod verify'
 	@go mod verify && [ "$(shell sha512sum go.mod)" = "`sha512sum go.mod`" ] || ( echo "ERROR: go.mod was modified by 'go mod verify'" && false )
+	@echo 'running: go list -mod=readonly -m all'
+	@go list -mod=readonly -m all 1> /dev/null
 
-scripts/golangci.yml: build.env scripts/golangci.yml.in
-	sed "s/@@CEPH_VERSION@@/$(CEPH_VERSION)/g" < scripts/golangci.yml.in > scripts/golangci.yml
+scripts/golangci.yml: scripts/golangci.yml.in
+	rm -f scripts/golangci.yml.buildtags.in
+	for tag in $(GO_TAGS_LIST); do \
+		echo "    - $$tag" >> scripts/golangci.yml.buildtags.in ; \
+	done
+	sed "/@@BUILD_TAGS@@/r scripts/golangci.yml.buildtags.in" scripts/golangci.yml.in | sed '/@@BUILD_TAGS@@/d' > scripts/golangci.yml
 
 go-lint: scripts/golangci.yml
 	./scripts/lint-go.sh
@@ -130,9 +141,6 @@ lint-helm:
 lint-py:
 	./scripts/lint-extras.sh lint-py
 
-gosec:
-	GO_TAGS="$(GO_TAGS)" ./scripts/gosec.sh
-
 func-test:
 	go test $(GO_TAGS) -mod=vendor github.com/ceph/ceph-csi/e2e $(TESTOPTIONS)
 
@@ -141,6 +149,10 @@ check-env:
 
 codespell:
 	codespell --config scripts/codespell.conf
+
+tickgit:
+	tickgit $(CURDIR)
+
 #
 # commitlint will do a rebase on top of GIT_SINCE when REBASE=1 is passed.
 #
@@ -160,6 +172,22 @@ cephcsi: check-env
 e2e.test: check-env
 	go test $(GO_TAGS) -mod=vendor -c ./e2e
 
+.PHONY: rbd-group-snapshot
+rbd-group-snapshot:
+	go build -o _output/rbd-group-snapshot ./tools/rbd-group-snapshot
+
+#
+# Update the generated deploy/ files when the template changed. This requires
+# running 'go mod vendor' so update the API files under the vendor/ directory.
+.PHONY: generate-deploy
+generate-deploy:
+	go mod vendor
+	$(MAKE) -C deploy
+
+.PHONY: check-all-committed
+check-all-committed: ## Fail in case there are uncommitted changes
+	test -z "$(shell git status --short)" || (echo "files were modified: " ; git status --short ; false)
+
 #
 # e2e testing by compiling e2e.test in case it does not exist and running the
 # executable. The e2e.test executable is not checked as a dependency in the
@@ -174,7 +202,7 @@ run-e2e: NAMESPACE ?= cephcsi-e2e-$(shell uuidgen | cut -d- -f1)
 run-e2e:
 	@test -e e2e.test || $(MAKE) e2e.test
 	cd e2e && \
-	../e2e.test -test.v -test.timeout="${E2E_TIMEOUT}" --deploy-timeout="${DEPLOY_TIMEOUT}" --cephcsi-namespace=$(NAMESPACE) $(E2E_ARGS)
+	../e2e.test -test.v -ginkgo.v -ginkgo.timeout="${E2E_TIMEOUT}" --deploy-timeout="${DEPLOY_TIMEOUT}" --cephcsi-namespace=$(NAMESPACE) $(E2E_ARGS)
 
 .container-cmd:
 	@test -n "$(shell which $(CONTAINER_CMD) 2>/dev/null)" || { echo "Missing container support, install Podman or Docker"; exit 1; }
@@ -192,9 +220,11 @@ containerized-test: .container-cmd .test-container-id
 
 ifeq ($(USE_PULLED_IMAGE),no)
 # create a (cached) container image with dependencies for building cephcsi
+.devel-container-id: GOARCH ?= $(shell go env GOARCH 2>/dev/null)
 .devel-container-id: .container-cmd scripts/Dockerfile.devel
 	[ ! -f .devel-container-id ] || $(CONTAINER_CMD) rmi $(CSI_IMAGE_NAME):devel
-	$(CONTAINER_CMD) build $(CPUSET) --build-arg BASE_IMAGE=$(BASE_IMAGE) -t $(CSI_IMAGE_NAME):devel -f ./scripts/Dockerfile.devel .
+	$(RM) .devel-container-id
+	$(CONTAINER_CMD) build $(CPUSET) --build-arg BASE_IMAGE=$(BASE_IMAGE) --build-arg GOARCH=$(GOARCH) -t $(CSI_IMAGE_NAME):devel -f ./scripts/Dockerfile.devel .
 	$(CONTAINER_CMD) inspect -f '{{.Id}}' $(CSI_IMAGE_NAME):devel > .devel-container-id
 else
 # create the .devel-container-id file based on pulled image
@@ -203,10 +233,12 @@ else
 endif
 
 ifeq ($(USE_PULLED_IMAGE),no)
+.test-container-id: GOARCH ?= $(shell go env GOARCH 2>/dev/null)
 # create a (cached) container image with dependencies for testing cephcsi
 .test-container-id: .container-cmd build.env scripts/Dockerfile.test
 	[ ! -f .test-container-id ] || $(CONTAINER_CMD) rmi $(CSI_IMAGE_NAME):test
-	$(CONTAINER_CMD) build $(CPUSET) -t $(CSI_IMAGE_NAME):test -f ./scripts/Dockerfile.test .
+	$(RM) .test-container-id
+	$(CONTAINER_CMD) build $(CPUSET) $(SECURITY_OPT) --build-arg GOARCH=$(GOARCH) -t $(CSI_IMAGE_NAME):test -f ./scripts/Dockerfile.test .
 	$(CONTAINER_CMD) inspect -f '{{.Id}}' $(CSI_IMAGE_NAME):test > .test-container-id
 else
 # create the .test-container-id file based on the pulled image

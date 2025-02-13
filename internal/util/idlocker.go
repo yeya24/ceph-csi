@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/ceph/ceph-csi/internal/util/log"
+
 	"k8s.io/apimachinery/pkg/util/sets"
 )
 
@@ -26,19 +28,22 @@ const (
 
 	// SnapshotOperationAlreadyExistsFmt string format to return for concurrent operation.
 	SnapshotOperationAlreadyExistsFmt = "an operation with the given Snapshot ID %s already exists"
+
+	// TargetPathOperationAlreadyExistsFmt string format to return for concurrent operation on target path.
+	TargetPathOperationAlreadyExistsFmt = "an operation with the given target path %s already exists"
 )
 
 // VolumeLocks implements a map with atomic operations. It stores a set of all volume IDs
 // with an ongoing operation.
 type VolumeLocks struct {
-	locks sets.String
+	locks sets.Set[string]
 	mux   sync.Mutex
 }
 
 // NewVolumeLocks returns new VolumeLocks.
 func NewVolumeLocks() *VolumeLocks {
 	return &VolumeLocks{
-		locks: sets.NewString(),
+		locks: sets.New[string](),
 	}
 }
 
@@ -240,6 +245,6 @@ func (ol *OperationLock) release(op operation, volumeID string) {
 			}
 		}
 	default:
-		ErrorLogMsg("%v operation not supported", op)
+		log.ErrorLogMsg("%v operation not supported", op)
 	}
 }

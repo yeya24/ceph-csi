@@ -17,62 +17,81 @@ limitations under the License.
 package util
 
 import (
+	"context"
 	"encoding/base64"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/ceph/ceph-csi/internal/kms"
+
 	"github.com/stretchr/testify/require"
 )
 
-func TestInitSecretsKMS(t *testing.T) {
-	t.Parallel()
-	secrets := map[string]string{}
-
-	// no passphrase in the secrets, should fail
-	kms, err := initSecretsKMS(secrets)
-	assert.Error(t, err)
-	assert.Nil(t, kms)
-
-	// set a passphrase and it should pass
-	secrets[encryptionPassphraseKey] = "plaintext encryption key"
-	kms, err = initSecretsKMS(secrets)
-	assert.NotNil(t, kms)
-	assert.NoError(t, err)
-}
-
 func TestGenerateNewEncryptionPassphrase(t *testing.T) {
 	t.Parallel()
-	b64Passphrase, err := generateNewEncryptionPassphrase()
+	b64Passphrase, err := generateNewEncryptionPassphrase(defaultEncryptionPassphraseSize)
 	require.NoError(t, err)
 
 	// b64Passphrase is URL-encoded, decode to verify the length of the
 	// passphrase
 	passphrase, err := base64.URLEncoding.DecodeString(b64Passphrase)
-	assert.NoError(t, err)
-	assert.Equal(t, encryptionPassphraseSize, len(passphrase))
+	require.NoError(t, err)
+	require.Len(t, passphrase, defaultEncryptionPassphraseSize)
 }
 
 func TestKMSWorkflow(t *testing.T) {
 	t.Parallel()
 	secrets := map[string]string{
-		encryptionPassphraseKey: "workflow test",
+		// FIXME: use encryptionPassphraseKey from SecretsKMS
+		"encryptionPassphrase": "workflow test",
 	}
 
-	kms, err := GetKMS("tenant", defaultKMSType, secrets)
-	assert.NoError(t, err)
-	require.NotNil(t, kms)
+	kmsProvider, err := kms.GetDefaultKMS(secrets)
+	require.NoError(t, err)
+	require.NotNil(t, kmsProvider)
 
-	ve, err := NewVolumeEncryption("", kms)
-	assert.NoError(t, err)
+	ve, err := NewVolumeEncryption("", kmsProvider)
+	require.NoError(t, err)
 	require.NotNil(t, ve)
-	assert.Equal(t, defaultKMSType, ve.GetID())
+	require.Equal(t, kms.DefaultKMSType, ve.GetID())
 
 	volumeID := "volume-id"
+	ctx := context.TODO()
 
-	err = ve.StoreNewCryptoPassphrase(volumeID)
-	assert.NoError(t, err)
+	err = ve.StoreNewCryptoPassphrase(ctx, volumeID, defaultEncryptionPassphraseSize)
+	require.NoError(t, err)
 
-	passphrase, err := ve.GetCryptoPassphrase(volumeID)
-	assert.NoError(t, err)
-	assert.Equal(t, secrets[encryptionPassphraseKey], passphrase)
+	passphrase, err := ve.GetCryptoPassphrase(ctx, volumeID)
+	require.NoError(t, err)
+	require.Equal(t, secrets["encryptionPassphrase"], passphrase)
+}
+
+func TestEncryptionType(t *testing.T) {
+	t.Parallel()
+	require.EqualValues(t, EncryptionTypeInvalid, ParseEncryptionType("wat?"))
+	require.EqualValues(t, EncryptionTypeInvalid, ParseEncryptionType("both"))
+	require.EqualValues(t, EncryptionTypeInvalid, ParseEncryptionType("file,block"))
+	require.EqualValues(t, EncryptionTypeInvalid, ParseEncryptionType("block,file"))
+	require.EqualValues(t, EncryptionTypeBlock, ParseEncryptionType("block"))
+	require.EqualValues(t, EncryptionTypeFile, ParseEncryptionType("file"))
+	require.EqualValues(t, EncryptionTypeNone, ParseEncryptionType(""))
+
+	for _, s := range []string{"file", "block", ""} {
+		require.EqualValues(t, s, ParseEncryptionType(s).String())
+	}
+}
+
+func TestFetchEncryptionType(t *testing.T) {
+	t.Parallel()
+	volOpts := map[string]string{}
+	require.EqualValues(t, EncryptionTypeBlock, FetchEncryptionType(volOpts, EncryptionTypeBlock))
+	require.EqualValues(t, EncryptionTypeFile, FetchEncryptionType(volOpts, EncryptionTypeFile))
+	require.EqualValues(t, EncryptionTypeNone, FetchEncryptionType(volOpts, EncryptionTypeNone))
+	volOpts["encryptionType"] = ""
+	require.EqualValues(t, EncryptionTypeInvalid, FetchEncryptionType(volOpts, EncryptionTypeNone))
+	volOpts["encryptionType"] = "block"
+	require.EqualValues(t, EncryptionTypeBlock, FetchEncryptionType(volOpts, EncryptionTypeNone))
+	volOpts["encryptionType"] = "file"
+	require.EqualValues(t, EncryptionTypeFile, FetchEncryptionType(volOpts, EncryptionTypeNone))
+	volOpts["encryptionType"] = "INVALID"
+	require.EqualValues(t, EncryptionTypeInvalid, FetchEncryptionType(volOpts, EncryptionTypeNone))
 }

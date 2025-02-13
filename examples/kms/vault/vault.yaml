@@ -39,7 +39,7 @@ spec:
     spec:
       containers:
         - name: vault
-          image: docker.io/library/vault:latest
+          image: docker.io/library/vault:1.8.5
           imagePullPolicy: "IfNotPresent"
           securityContext:
             runAsUser: 100
@@ -48,6 +48,8 @@ spec:
               value: sample_root_token_id
             - name: SKIP_SETCAP
               value: any
+            - name: HOME
+              value: /home
           livenessProbe:
             exec:
               command:
@@ -58,6 +60,28 @@ spec:
           ports:
             - containerPort: 8200
               name: vault-api
+          volumeMounts:
+            - name: home
+              mountPath: /home
+        - name: monitor
+          image: docker.io/library/vault:1.8.5
+          imagePullPolicy: "IfNotPresent"
+          securityContext:
+            runAsUser: 100
+          env:
+            - name: VAULT_ADDR
+              value: http://localhost:8200
+            - name: HOME
+              value: /home
+          command:
+            - vault
+            - monitor
+          volumeMounts:
+            - name: home
+              mountPath: /home
+      volumes:
+        - name: home
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -127,7 +151,7 @@ spec:
             name: init-scripts
       containers:
         - name: vault-init-job
-          image: docker.io/library/vault:latest
+          image: docker.io/library/vault:1.8.5
           securityContext:
             runAsUser: 100
           volumeMounts:
@@ -145,7 +169,7 @@ spec:
             - name: PLUGIN_ROLE
               value: csi-kubernetes
             - name: SERVICE_ACCOUNTS
-              value: rbd-csi-nodeplugin,rbd-csi-provisioner,csi-rbdplugin,csi-rbdplugin-provisioner
+              value: rbd-csi-nodeplugin,rbd-csi-provisioner,csi-rbdplugin,csi-rbdplugin-provisioner,cephfs-csi-nodeplugin,cephfs-csi-provisioner,csi-cephfsplugin,csi-cephfsplugin-provisioner
             - name: SERVICE_ACCOUNTS_NAMESPACE
               value: default
             - name: VAULT_ADDR

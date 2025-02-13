@@ -90,6 +90,31 @@ data:
       "user-secrets-metadata-test": {
         "encryptionKMSType": "metadata",
         "secretName": "storage-encryption-secret"
+      },
+      "ibmkeyprotect-test": {
+        "encryptionKMSType": "ibmkeyprotect",
+        "secretName": "ceph-csi-kp-credentials",
+        "keyProtectRegionKey": "us-south-2",
+        "keyProtectServiceInstanceID": "7abef064-01dd-4237-9ea5-8b3890970be3"
+      },
+      "aws-sts-metadata-test": {
+        "encryptionKMSType": "aws-sts-metadata",
+        "secretName": "ceph-csi-aws-credentials"
+      },
+     "kmip-test": {
+        "KMS_PROVIDER": "kmip",
+        "KMIP_ENDPOINT": "kmip:5696",
+        "KMIP_SECRET_NAME": "ceph-csi-kmip-credentials",
+        "TLS_SERVER_NAME": "kmip.ciphertrustmanager.local",
+        "READ_TIMEOUT": 10,
+        "WRITE_TIMEOUT": 10
+      },
+      "azure-test": {
+        "KMS_PROVIDER": "azure-kv",
+        "AZURE_CERT_SECRET_NAME": "ceph-csi-azure-credentials",
+        "AZURE_VAULT_URL": "https://vault-name.vault.azure.net/",
+        "AZURE_CLIENT_ID": "__CLIENT_ID__",
+        "AZURE_TENANT_ID": "__TENANT_ID__"
       }
     }
 metadata:

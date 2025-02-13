@@ -11,42 +11,56 @@
 FROM registry.fedoraproject.org/fedora:latest
 
 ARG GOPATH=/go
+ARG GOROOT=/usr/local/go
+ARG GOARCH
 
 ENV \
  GOPATH=${GOPATH} \
+ GOROOT=${GOROOT} \
  GO111MODULE=on \
- PATH="${GOPATH}/bin:/opt/commitlint/node_modules/.bin:${PATH}"
+ CEPHCSIPATH=/go/src/github.com/ceph/ceph-csi \
+ PATH="${GOPATH}/bin:${GOROOT}/bin:/opt/commitlint/node_modules/.bin:${PATH}"
 
 COPY build.env /
 
+RUN mkdir -p /etc/selinux && touch /etc/selinux/config
+
 RUN source /build.env \
+    && \
+    ( test -n "${GOARCH}" && exit 0; echo -e "\n\nMissing GOARCH argument for building image, install Golang or run: make containerized-test GOARCH=amd64\n\n"; exit 1 ) \
     && dnf -y install \
 	git \
 	make \
-	golang \
 	gcc \
+	findutils \
 	librados-devel \
+        libcephfs-devel \
 	librbd-devel \
+	openssl \
+	ruby-devel \
 	rubygems \
 	ShellCheck \
-      codespell \
+	codespell \
 	yamllint \
 	npm \
 	diffutils \
-      python3-prettytable \
-      pylint \
+	python3-prettytable \
+	pylint \
     && dnf -y update \
     && dnf -y clean all \
     && gem install mdl \
-    && curl -sf "https://install.goreleaser.com/github.com/golangci/golangci-lint.sh" \
+    && mkdir -p ${GOROOT} \
+    && curl https://storage.googleapis.com/golang/go${GOLANG_VERSION}.linux-${GOARCH}.tar.gz  \
+       | tar xzf - -C ${GOROOT} --strip-components=1 \
+    && curl -sf "https://raw.githubusercontent.com/golangci/golangci-lint/${GOLANGCI_VERSION}/install.sh" \
        | bash -s -- -b ${GOPATH}/bin "${GOLANGCI_VERSION}" \
-    && curl -sfL "https://raw.githubusercontent.com/securego/gosec/master/install.sh" \
-       | sh -s -- -b $GOPATH/bin "${GOSEC_VERSION}" \
-    && curl -L https://git.io/get_helm.sh | bash -s -- --version "${HELM_VERSION}" \
+    && curl -L "${HELM_SCRIPT}" | bash -s -- --version "${HELM_VERSION}" \
     && mkdir /opt/commitlint && pushd /opt/commitlint \
     && npm init -y \
     && npm install @commitlint/cli@"${COMMITLINT_VERSION}" \
     && popd \
+    && git config --global --add safe.directory ${CEPHCSIPATH} \
+    && go install github.com/augmentable-dev/tickgit/cmd/tickgit@latest \
     && true
 
-WORKDIR /go/src/github.com/ceph/ceph-csi
+WORKDIR ${CEPHCSIPATH}

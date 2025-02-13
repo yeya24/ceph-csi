@@ -42,74 +42,7 @@ spec:
       serviceAccountName: cephfs-csi-provisioner
       priorityClassName: system-cluster-critical
       containers:
-        - name: csi-provisioner
-          image: k8s.gcr.io/sig-storage/csi-provisioner:v3.0.0
-          args:
-            - "--csi-address=$(ADDRESS)"
-            - "--v=5"
-            - "--timeout=150s"
-            - "--leader-election=true"
-            - "--retry-interval-start=500ms"
-            - "--feature-gates=Topology=false"
-            - "--extra-create-metadata=true"
-          env:
-            - name: ADDRESS
-              value: unix:///csi/csi-provisioner.sock
-          imagePullPolicy: "IfNotPresent"
-          volumeMounts:
-            - name: socket-dir
-              mountPath: /csi
-        - name: csi-resizer
-          image: k8s.gcr.io/sig-storage/csi-resizer:v1.3.0
-          args:
-            - "--csi-address=$(ADDRESS)"
-            - "--v=5"
-            - "--timeout=150s"
-            - "--leader-election"
-            - "--retry-interval-start=500ms"
-            - "--handle-volume-inuse-error=false"
-          env:
-            - name: ADDRESS
-              value: unix:///csi/csi-provisioner.sock
-          imagePullPolicy: "IfNotPresent"
-          volumeMounts:
-            - name: socket-dir
-              mountPath: /csi
-        - name: csi-snapshotter
-          image: k8s.gcr.io/sig-storage/csi-snapshotter:v4.2.0
-          args:
-            - "--csi-address=$(ADDRESS)"
-            - "--v=5"
-            - "--timeout=150s"
-            - "--leader-election=true"
-          env:
-            - name: ADDRESS
-              value: unix:///csi/csi-provisioner.sock
-          imagePullPolicy: "IfNotPresent"
-          securityContext:
-            privileged: true
-          volumeMounts:
-            - name: socket-dir
-              mountPath: /csi
-        - name: csi-cephfsplugin-attacher
-          image: k8s.gcr.io/sig-storage/csi-attacher:v3.3.0
-          args:
-            - "--v=5"
-            - "--csi-address=$(ADDRESS)"
-            - "--leader-election=true"
-            - "--retry-interval-start=500ms"
-          env:
-            - name: ADDRESS
-              value: /csi/csi-provisioner.sock
-          imagePullPolicy: "IfNotPresent"
-          volumeMounts:
-            - name: socket-dir
-              mountPath: /csi
         - name: csi-cephfsplugin
-          securityContext:
-            privileged: true
-            capabilities:
-              add: ["SYS_ADMIN"]
           # for stable functionality replace canary with latest release version
           image: quay.io/cephcsi/cephcsi:canary
           args:
@@ -121,6 +54,7 @@ spec:
             - "--drivername=cephfs.csi.ceph.com"
             - "--pidlimit=-1"
             - "--enableprofiling=false"
+            - "--setmetadata=true"
           env:
             - name: POD_IP
               valueFrom:
@@ -132,6 +66,12 @@ spec:
                   fieldPath: spec.nodeName
             - name: CSI_ENDPOINT
               value: unix:///csi/csi-provisioner.sock
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          # - name: KMS_CONFIGMAP_NAME
+          #   value: encryptionConfig
           imagePullPolicy: "IfNotPresent"
           volumeMounts:
             - name: socket-dir
@@ -143,10 +83,92 @@ spec:
               readOnly: true
             - name: host-dev
               mountPath: /dev
+            - name: ceph-config
+              mountPath: /etc/ceph/
             - name: ceph-csi-config
               mountPath: /etc/ceph-csi-config/
             - name: keys-tmp-dir
               mountPath: /tmp/csi/keys
+            - name: ceph-csi-encryption-kms-config
+              mountPath: /etc/ceph-csi-encryption-kms-config/
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
+          args:
+            - "--csi-address=$(ADDRESS)"
+            - "--v=1"
+            - "--timeout=150s"
+            - "--leader-election=true"
+            - "--retry-interval-start=500ms"
+            - "--feature-gates=HonorPVReclaimPolicy=true"
+            - "--prevent-volume-mode-conversion=true"
+            - "--extra-create-metadata=true"
+            - "--http-endpoint=$(POD_IP):8090"
+          env:
+            - name: ADDRESS
+              value: unix:///csi/csi-provisioner.sock
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          imagePullPolicy: "IfNotPresent"
+          ports:
+            - containerPort: 8090
+              name: http-endpoint
+              protocol: TCP
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-resizer
+          image: registry.k8s.io/sig-storage/csi-resizer:v1.13.1
+          args:
+            - "--csi-address=$(ADDRESS)"
+            - "--v=1"
+            - "--timeout=150s"
+            - "--leader-election"
+            - "--retry-interval-start=500ms"
+            - "--handle-volume-inuse-error=false"
+            - "--feature-gates=RecoverVolumeExpansionFailure=true"
+            - "--http-endpoint=$(POD_IP):8091"
+          env:
+            - name: ADDRESS
+              value: unix:///csi/csi-provisioner.sock
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          imagePullPolicy: "IfNotPresent"
+          ports:
+            - containerPort: 8091
+              name: http-endpoint
+              protocol: TCP
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-snapshotter
+          image: registry.k8s.io/sig-storage/csi-snapshotter:v8.2.0
+          args:
+            - "--csi-address=$(ADDRESS)"
+            - "--v=1"
+            - "--timeout=150s"
+            - "--leader-election=true"
+            - "--extra-create-metadata=true"
+            - "--feature-gates=CSIVolumeGroupSnapshot=true"
+            - "--http-endpoint=$(POD_IP):8092"
+          env:
+            - name: ADDRESS
+              value: unix:///csi/csi-provisioner.sock
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          imagePullPolicy: "IfNotPresent"
+          ports:
+            - containerPort: 8092
+              name: http-endpoint
+              protocol: TCP
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
         - name: liveness-prometheus
           image: quay.io/cephcsi/cephcsi:canary
           args:
@@ -163,6 +185,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+          ports:
+            - containerPort: 8681
+              name: http-metrics
+              protocol: TCP
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
@@ -181,6 +207,9 @@ spec:
         - name: host-dev
           hostPath:
             path: /dev
+        - name: ceph-config
+          configMap:
+            name: ceph-config
         - name: ceph-csi-config
           configMap:
             name: ceph-csi-config
@@ -188,3 +217,6 @@ spec:
           emptyDir: {
             medium: "Memory"
           }
+        - name: ceph-csi-encryption-kms-config
+          configMap:
+            name: ceph-csi-encryption-kms-config

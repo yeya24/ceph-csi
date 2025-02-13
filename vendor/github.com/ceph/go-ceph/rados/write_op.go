@@ -10,6 +10,7 @@ import "C"
 import (
 	"unsafe"
 
+	"github.com/ceph/go-ceph/internal/cutil"
 	ts "github.com/ceph/go-ceph/internal/timespec"
 )
 
@@ -92,24 +93,39 @@ func (w *WriteOp) Create(exclusive CreateOption) {
 
 // SetOmap appends the map `pairs` to the omap `oid`.
 func (w *WriteOp) SetOmap(pairs map[string][]byte) {
-	sos := newSetOmapStep(pairs)
-	w.steps = append(w.steps, sos)
-	C.rados_write_op_omap_set(
+	keys := make([]string, len(pairs))
+	values := make([][]byte, len(pairs))
+	idx := 0
+	for k, v := range pairs {
+		keys[idx] = k
+		values[idx] = v
+		idx++
+	}
+
+	cKeys := cutil.NewBufferGroupStrings(keys)
+	cValues := cutil.NewBufferGroupBytes(values)
+	defer cKeys.Free()
+	defer cValues.Free()
+
+	C.rados_write_op_omap_set2(
 		w.op,
-		(**C.char)(sos.cKeys.Ptr()),
-		(**C.char)(sos.cValues.Ptr()),
-		(*C.size_t)(sos.cLengths.Ptr()),
-		sos.cNum)
+		(**C.char)(cKeys.BuffersPtr()),
+		(**C.char)(cValues.BuffersPtr()),
+		(*C.size_t)(cKeys.LengthsPtr()),
+		(*C.size_t)(cValues.LengthsPtr()),
+		(C.size_t)(len(pairs)))
 }
 
 // RmOmapKeys removes the specified `keys` from the omap `oid`.
 func (w *WriteOp) RmOmapKeys(keys []string) {
-	roks := newRemoveOmapKeysStep(keys)
-	w.steps = append(w.steps, roks)
-	C.rados_write_op_omap_rm_keys(
+	cKeys := cutil.NewBufferGroupStrings(keys)
+	defer cKeys.Free()
+
+	C.rados_write_op_omap_rm_keys2(
 		w.op,
-		(**C.char)(roks.cKeys.Ptr()),
-		roks.cNum)
+		(**C.char)(cKeys.BuffersPtr()),
+		(*C.size_t)(cKeys.LengthsPtr()),
+		(C.size_t)(len(keys)))
 }
 
 // CleanOmap clears the omap `oid`.
@@ -120,7 +136,8 @@ func (w *WriteOp) CleanOmap() {
 // AssertExists assures the object targeted by the write op exists.
 //
 // Implements:
-//  void rados_write_op_assert_exists(rados_write_op_t write_op);
+//
+//	void rados_write_op_assert_exists(rados_write_op_t write_op);
 func (w *WriteOp) AssertExists() {
 	C.rados_write_op_assert_exists(w.op)
 }
@@ -128,10 +145,11 @@ func (w *WriteOp) AssertExists() {
 // Write a given byte slice at the supplied offset.
 //
 // Implements:
-//  void rados_write_op_write(rados_write_op_t write_op,
-//                                       const char *buffer,
-//                                       size_t len,
-//                                       uint64_t offset);
+//
+//	void rados_write_op_write(rados_write_op_t write_op,
+//	                                     const char *buffer,
+//	                                     size_t len,
+//	                                     uint64_t offset);
 func (w *WriteOp) Write(b []byte, offset uint64) {
 	oe := newWriteStep(b, 0, offset)
 	w.steps = append(w.steps, oe)
@@ -146,9 +164,10 @@ func (w *WriteOp) Write(b []byte, offset uint64) {
 // atomically replacing it.
 //
 // Implements:
-//  void rados_write_op_write_full(rados_write_op_t write_op,
-//                                 const char *buffer,
-//                                 size_t len);
+//
+//	void rados_write_op_write_full(rados_write_op_t write_op,
+//	                               const char *buffer,
+//	                               size_t len);
 func (w *WriteOp) WriteFull(b []byte) {
 	oe := newWriteStep(b, 0, 0)
 	w.steps = append(w.steps, oe)
@@ -162,11 +181,12 @@ func (w *WriteOp) WriteFull(b []byte) {
 // writeLen is satisfied.
 //
 // Implements:
-//  void rados_write_op_writesame(rados_write_op_t write_op,
-//                                const char *buffer,
-//                                size_t data_len,
-//                                size_t write_len,
-//                                uint64_t offset);
+//
+//	void rados_write_op_writesame(rados_write_op_t write_op,
+//	                              const char *buffer,
+//	                              size_t data_len,
+//	                              size_t write_len,
+//	                              uint64_t offset);
 func (w *WriteOp) WriteSame(b []byte, writeLen, offset uint64) {
 	oe := newWriteStep(b, writeLen, offset)
 	w.steps = append(w.steps, oe)

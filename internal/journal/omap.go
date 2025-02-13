@@ -19,8 +19,10 @@ package journal
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/ceph/ceph-csi/internal/util"
+	"github.com/ceph/ceph-csi/internal/util/log"
 
 	"github.com/ceph/go-ceph/rados"
 )
@@ -33,7 +35,8 @@ const chunkSize int64 = 512
 func getOMapValues(
 	ctx context.Context,
 	conn *Connection,
-	poolName, namespace, oid, prefix string, keys []string) (map[string]string, error) {
+	poolName, namespace, oid, prefix string, keys []string,
+) (map[string]string, error) {
 	// fetch and configure the rados ioctx
 	ioctx, err := conn.conn.GetIoctx(poolName)
 	if err != nil {
@@ -74,16 +77,16 @@ func getOMapValues(
 
 	if err != nil {
 		if errors.Is(err, rados.ErrNotFound) {
-			util.ErrorLog(ctx, "omap not found (pool=%q, namespace=%q, name=%q): %v",
+			log.ErrorLog(ctx, "omap not found (pool=%q, namespace=%q, name=%q): %v",
 				poolName, namespace, oid, err)
 
-			return nil, util.JoinErrors(util.ErrKeyNotFound, err)
+			return nil, fmt.Errorf("%w: %w", util.ErrKeyNotFound, err)
 		}
 
 		return nil, err
 	}
 
-	util.DebugLog(ctx, "got omap values: (pool=%q, namespace=%q, name=%q): %+v",
+	log.DebugLog(ctx, "got omap values: (pool=%q, namespace=%q, name=%q): %+v",
 		poolName, namespace, oid, results)
 
 	return results, nil
@@ -92,7 +95,8 @@ func getOMapValues(
 func removeMapKeys(
 	ctx context.Context,
 	conn *Connection,
-	poolName, namespace, oid string, keys []string) error {
+	poolName, namespace, oid string, keys []string,
+) error {
 	// fetch and configure the rados ioctx
 	ioctx, err := conn.conn.GetIoctx(poolName)
 	if err != nil {
@@ -110,16 +114,16 @@ func removeMapKeys(
 			// the previous implementation of removing omap keys (via the cli)
 			// treated failure to find the omap as a non-error. Do so here to
 			// mimic the previous behavior.
-			util.DebugLog(ctx, "when removing omap keys, omap not found (pool=%q, namespace=%q, name=%q): %+v",
+			log.DebugLog(ctx, "when removing omap keys, omap not found (pool=%q, namespace=%q, name=%q): %+v",
 				poolName, namespace, oid, keys)
 		} else {
-			util.ErrorLog(ctx, "failed removing omap keys (pool=%q, namespace=%q, name=%q): %v",
+			log.ErrorLog(ctx, "failed removing omap keys (pool=%q, namespace=%q, name=%q): %v",
 				poolName, namespace, oid, err)
 
 			return err
 		}
 	}
-	util.DebugLog(ctx, "removed omap keys (pool=%q, namespace=%q, name=%q): %+v",
+	log.DebugLog(ctx, "removed omap keys (pool=%q, namespace=%q, name=%q): %+v",
 		poolName, namespace, oid, keys)
 
 	return nil
@@ -128,7 +132,8 @@ func removeMapKeys(
 func setOMapKeys(
 	ctx context.Context,
 	conn *Connection,
-	poolName, namespace, oid string, pairs map[string]string) error {
+	poolName, namespace, oid string, pairs map[string]string,
+) error {
 	// fetch and configure the rados ioctx
 	ioctx, err := conn.conn.GetIoctx(poolName)
 	if err != nil {
@@ -146,12 +151,12 @@ func setOMapKeys(
 	}
 	err = ioctx.SetOmap(oid, bpairs)
 	if err != nil {
-		util.ErrorLog(ctx, "failed setting omap keys (pool=%q, namespace=%q, name=%q, pairs=%+v): %v",
+		log.ErrorLog(ctx, "failed setting omap keys (pool=%q, namespace=%q, name=%q, pairs=%+v): %v",
 			poolName, namespace, oid, pairs, err)
 
 		return err
 	}
-	util.DebugLog(ctx, "set omap keys (pool=%q, namespace=%q, name=%q): %+v)",
+	log.DebugLog(ctx, "set omap keys (pool=%q, namespace=%q, name=%q): %+v)",
 		poolName, namespace, oid, pairs)
 
 	return nil
@@ -159,8 +164,62 @@ func setOMapKeys(
 
 func omapPoolError(err error) error {
 	if errors.Is(err, rados.ErrNotFound) {
-		return util.JoinErrors(util.ErrPoolNotFound, err)
+		return fmt.Errorf("Failed as %w (internal %w)", util.ErrPoolNotFound, err)
 	}
 
 	return err
+}
+
+// listOMapValues fetches all omap values for a given oid, prefix, and namespace.
+func listOMapValues(
+	ctx context.Context,
+	conn *Connection,
+	poolName, namespace, oid, prefix string,
+) (map[string]string, error) {
+	// fetch and configure the rados ioctx
+	ioctx, err := conn.conn.GetIoctx(poolName)
+	if err != nil {
+		return nil, omapPoolError(err)
+	}
+	defer ioctx.Destroy()
+
+	if namespace != "" {
+		ioctx.SetNamespace(namespace)
+	}
+
+	results := map[string]string{}
+
+	numKeys := uint64(0)
+	startAfter := ""
+	for {
+		prevNumKeys := numKeys
+		err = ioctx.ListOmapValues(
+			oid, startAfter, prefix, chunkSize,
+			func(key string, value []byte) {
+				numKeys++
+				startAfter = key
+				results[key] = string(value)
+			},
+		)
+		// if we hit an error, or no new keys were seen, exit the loop
+		if err != nil || numKeys == prevNumKeys {
+			break
+		}
+	}
+
+	if err != nil {
+		if errors.Is(err, rados.ErrNotFound) {
+			log.ErrorLog(ctx, "omap not found (pool=%q, namespace=%q, name=%q): %v",
+				poolName, namespace, oid, err)
+
+			return nil, fmt.Errorf("%w: %w", util.ErrKeyNotFound, err)
+		}
+
+		return nil, err
+	}
+
+	log.DebugLog(ctx, "got omap values: (pool=%q, namespace=%q, name=%q): %+v",
+		poolName, namespace, oid, results)
+
+	return results, nil
 }

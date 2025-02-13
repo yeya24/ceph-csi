@@ -21,7 +21,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"time"
+
+	"github.com/ceph/ceph-csi/internal/util/log"
+	"github.com/ceph/ceph-csi/internal/util/stripsecrets"
 
 	"github.com/ceph/go-ceph/rados"
 )
@@ -29,13 +34,54 @@ import (
 // InvalidPoolID used to denote an invalid pool.
 const InvalidPoolID int64 = -1
 
+// ExecuteCommandWithNSEnter executes passed in program with args with nsenter
+// and returns separate stdout and stderr streams. In case ctx is not set to
+// context.TODO(), the command will be logged after it was executed.
+func ExecuteCommandWithNSEnter(ctx context.Context, netPath, program string, args ...string) (string, string, error) {
+	var (
+		stdoutBuf bytes.Buffer
+		stderrBuf bytes.Buffer
+		nsenter   = "nsenter"
+	)
+
+	// check netPath exists
+	if _, err := os.Stat(netPath); err != nil {
+		return "", "", fmt.Errorf("failed to get stat for %s %w", netPath, err)
+	}
+	//  nsenter --net=%s -- <program> <args>
+	args = append([]string{"--net=" + netPath, "--", program}, args...)
+	sanitizedArgs := stripsecrets.InArgs(args)
+	cmd := exec.Command(nsenter, args...) // #nosec:G204, commands executing not vulnerable.
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	err := cmd.Run()
+	stdout := stdoutBuf.String()
+	stderr := stderrBuf.String()
+
+	if err != nil {
+		err = fmt.Errorf("an error (%w) occurred while running %s args: %v", err, nsenter, sanitizedArgs)
+		if ctx != context.TODO() {
+			log.UsefulLog(ctx, "%s", err)
+		}
+
+		return stdout, stderr, err
+	}
+
+	if ctx != context.TODO() {
+		log.UsefulLog(ctx, "command succeeded: %s %v", nsenter, sanitizedArgs)
+	}
+
+	return stdout, stderr, nil
+}
+
 // ExecCommand executes passed in program with args and returns separate stdout
 // and stderr streams. In case ctx is not set to context.TODO(), the command
 // will be logged after it was executed.
 func ExecCommand(ctx context.Context, program string, args ...string) (string, string, error) {
 	var (
 		cmd           = exec.Command(program, args...) // #nosec:G204, commands executing not vulnerable.
-		sanitizedArgs = StripSecretInArgs(args)
+		sanitizedArgs = stripsecrets.InArgs(args)
 		stdoutBuf     bytes.Buffer
 		stderrBuf     bytes.Buffer
 	)
@@ -50,14 +96,68 @@ func ExecCommand(ctx context.Context, program string, args ...string) (string, s
 	if err != nil {
 		err = fmt.Errorf("an error (%w) occurred while running %s args: %v", err, program, sanitizedArgs)
 		if ctx != context.TODO() {
-			UsefulLog(ctx, "%s", err)
+			log.UsefulLog(ctx, "%s", err)
 		}
 
 		return stdout, stderr, err
 	}
 
 	if ctx != context.TODO() {
-		UsefulLog(ctx, "command succeeded: %s %v", program, sanitizedArgs)
+		log.UsefulLog(ctx, "command succeeded: %s %v", program, sanitizedArgs)
+	}
+
+	return stdout, stderr, nil
+}
+
+// ExecCommandWithTimeout executes passed in program with args, timeout and
+// returns separate stdout and stderr streams. If the command is not executed
+// within given timeout, the process will be killed. In case ctx is not set to
+// context.TODO(), the command will be logged after it was executed.
+func ExecCommandWithTimeout(
+	ctx context.Context,
+	timeout time.Duration,
+	program string,
+	args ...string) (
+	string,
+	string,
+	error,
+) {
+	var (
+		sanitizedArgs = stripsecrets.InArgs(args)
+		stdoutBuf     bytes.Buffer
+		stderrBuf     bytes.Buffer
+	)
+
+	cctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(cctx, program, args...) // #nosec:G204, commands executing not vulnerable.
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	err := cmd.Run()
+	stdout := stdoutBuf.String()
+	stderr := stderrBuf.String()
+	if err != nil {
+		// if its a timeout log return context deadline exceeded error message
+		if errors.Is(cctx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("timeout: %w", cctx.Err())
+		}
+		err = fmt.Errorf("an error (%w) and stderror (%s) occurred while running %s args: %v",
+			err,
+			stderr,
+			program,
+			sanitizedArgs)
+
+		if ctx != context.TODO() {
+			log.ErrorLog(ctx, "%s", err)
+		}
+
+		return stdout, stderr, err
+	}
+
+	if ctx != context.TODO() {
+		log.UsefulLog(ctx, "command succeeded: %s %v", program, sanitizedArgs)
 	}
 
 	return stdout, stderr, nil
@@ -136,7 +236,7 @@ func CreateObject(ctx context.Context, monitors string, cr *Credentials, poolNam
 	ioctx, err := conn.GetIoctx(poolName)
 	if err != nil {
 		if errors.Is(err, ErrPoolNotFound) {
-			err = JoinErrors(ErrObjectNotFound, err)
+			err = fmt.Errorf("Failed as %w (internal %w)", ErrObjectNotFound, err)
 		}
 
 		return err
@@ -149,9 +249,9 @@ func CreateObject(ctx context.Context, monitors string, cr *Credentials, poolNam
 
 	err = ioctx.Create(objectName, rados.CreateExclusive)
 	if errors.Is(err, rados.ErrObjectExists) {
-		return JoinErrors(ErrObjectExists, err)
+		return fmt.Errorf("Failed as %w (internal %w)", ErrObjectExists, err)
 	} else if err != nil {
-		ErrorLog(ctx, "failed creating omap (%s) in pool (%s): (%v)", objectName, poolName, err)
+		log.ErrorLog(ctx, "failed creating omap (%s) in pool (%s): (%v)", objectName, poolName, err)
 
 		return err
 	}
@@ -172,7 +272,7 @@ func RemoveObject(ctx context.Context, monitors string, cr *Credentials, poolNam
 	ioctx, err := conn.GetIoctx(poolName)
 	if err != nil {
 		if errors.Is(err, ErrPoolNotFound) {
-			err = JoinErrors(ErrObjectNotFound, err)
+			err = fmt.Errorf("Failed as %w (internal %w)", ErrObjectNotFound, err)
 		}
 
 		return err
@@ -185,9 +285,9 @@ func RemoveObject(ctx context.Context, monitors string, cr *Credentials, poolNam
 
 	err = ioctx.Delete(oMapName)
 	if errors.Is(err, rados.ErrNotFound) {
-		return JoinErrors(ErrObjectNotFound, err)
+		return fmt.Errorf("Failed as %w (internal %w)", ErrObjectNotFound, err)
 	} else if err != nil {
-		ErrorLog(ctx, "failed removing omap (%s) in pool (%s): (%v)", oMapName, poolName, err)
+		log.ErrorLog(ctx, "failed removing omap (%s) in pool (%s): (%v)", oMapName, poolName, err)
 
 		return err
 	}

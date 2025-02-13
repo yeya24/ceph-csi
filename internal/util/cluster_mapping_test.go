@@ -17,11 +17,15 @@ limitations under the License.
 package util
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
+
+	cephcsi "github.com/ceph/ceph-csi/api/deploy/kubernetes"
 )
 
 func TestGetClusterMappingInfo(t *testing.T) {
@@ -134,29 +138,27 @@ func TestGetClusterMappingInfo(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		currentI := i
-		currentTT := tt
-		t.Run(currentTT.name, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			mappingConfigFile := fmt.Sprintf("%s/mapping-%d.json", mappingBasePath, currentI)
-			if len(currentTT.mappingFilecontent) != 0 {
-				err = ioutil.WriteFile(mappingConfigFile, currentTT.mappingFilecontent, 0o600)
+			mappingConfigFile := fmt.Sprintf("%s/mapping-%d.json", mappingBasePath, i)
+			if len(tt.mappingFilecontent) != 0 {
+				err = os.WriteFile(mappingConfigFile, tt.mappingFilecontent, 0o600)
 				if err != nil {
 					t.Errorf("failed to write to %q, error = %v", mappingConfigFile, err)
 				}
 			}
-			data, mErr := getClusterMappingInfo(currentTT.clusterID, mappingConfigFile)
-			if (mErr != nil) != currentTT.expectErr {
-				t.Errorf("getClusterMappingInfo() error = %v, expected Error %v", mErr, currentTT.expectErr)
+			data, mErr := getClusterMappingInfo(tt.clusterID, mappingConfigFile)
+			if (mErr != nil) != tt.expectErr {
+				t.Errorf("getClusterMappingInfo() error = %v, expected Error %v", mErr, tt.expectErr)
 			}
-			if !reflect.DeepEqual(data, currentTT.expectedData) {
-				t.Errorf("getClusterMappingInfo() = %v, expected data %v", data, currentTT.expectedData)
+			if !reflect.DeepEqual(data, tt.expectedData) {
+				t.Errorf("getClusterMappingInfo() = %v, expected data %v", data, tt.expectedData)
 			}
 		})
 	}
 
-	clusterMappingConfigFile = fmt.Sprintf("%s/mapping.json", mappingBasePath)
-	err = ioutil.WriteFile(clusterMappingConfigFile, mappingFileContent, 0o600)
+	clusterMappingConfigFile = mappingBasePath + "/mapping.json"
+	err = os.WriteFile(clusterMappingConfigFile, mappingFileContent, 0o600)
 	if err != nil {
 		t.Errorf("failed to write mapping content error = %v", err)
 	}
@@ -238,4 +240,184 @@ func validateMapping(t *testing.T, clusterID, rbdPoolID, cephFSPoolID string, ma
 	}
 
 	return nil
+}
+
+func TestGetMappedID(t *testing.T) {
+	t.Parallel()
+	type args struct {
+		key   string
+		value string
+		id    string
+	}
+	tests := []struct {
+		name     string
+		args     args
+		expected string
+	}{
+		{
+			name: "test for matching key",
+			args: args{
+				key:   "cluster1",
+				value: "cluster2",
+				id:    "cluster1",
+			},
+			expected: "cluster2",
+		},
+		{
+			name: "test for matching value",
+			args: args{
+				key:   "cluster1",
+				value: "cluster2",
+				id:    "cluster2",
+			},
+			expected: "cluster1",
+		},
+		{
+			name: "test for invalid match",
+			args: args{
+				key:   "cluster1",
+				value: "cluster2",
+				id:    "cluster3",
+			},
+			expected: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			val := GetMappedID(tt.args.key, tt.args.value, tt.args.id)
+			if val != tt.expected {
+				t.Errorf("getMappedID() got = %v, expected %v", val, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFetchMappedClusterIDAndMons(t *testing.T) {
+	t.Parallel()
+	ctx := context.TODO()
+	type args struct {
+		ctx       context.Context
+		clusterID string
+	}
+	mappingBasePath := t.TempDir()
+	csiConfigFile := mappingBasePath + "/config.json"
+	clusterMappingConfigFile := mappingBasePath + "/cluster-mapping.json"
+	csiConfig := []cephcsi.ClusterInfo{
+		{
+			ClusterID: "cluster-1",
+			Monitors:  []string{"ip-1", "ip-2"},
+		},
+		{
+			ClusterID: "cluster-2",
+			Monitors:  []string{"ip-3", "ip-4"},
+		},
+	}
+	csiConfigFileContent, err := json.Marshal(csiConfig)
+	if err != nil {
+		t.Errorf("failed to marshal csi config info %v", err)
+	}
+	err = os.WriteFile(csiConfigFile, csiConfigFileContent, 0o600)
+	if err != nil {
+		t.Errorf("failed to write %s file content: %v", CsiConfigFile, err)
+	}
+
+	t.Run("cluster-mapping.json does not exist", func(t *testing.T) {
+		_, _, err = fetchMappedClusterIDAndMons(ctx, "cluster-2", clusterMappingConfigFile, csiConfigFile)
+		if err != nil {
+			t.Errorf("FetchMappedClusterIDAndMons() error = %v, wantErr %v", err, nil)
+		}
+	})
+
+	clusterMapping := []ClusterMappingInfo{
+		{
+			ClusterIDMapping: map[string]string{
+				"cluster-1": "cluster-3",
+			},
+		},
+		{
+			ClusterIDMapping: map[string]string{
+				"cluster-1": "cluster-4",
+			},
+		},
+		{
+			ClusterIDMapping: map[string]string{
+				"cluster-4": "cluster-3",
+			},
+		},
+	}
+	clusterMappingFileContent, err := json.Marshal(clusterMapping)
+	if err != nil {
+		t.Errorf("failed to marshal mapping info %v", err)
+	}
+	err = os.WriteFile(clusterMappingConfigFile, clusterMappingFileContent, 0o600)
+	if err != nil {
+		t.Errorf("failed to write %s file content: %v", clusterMappingFileContent, err)
+	}
+
+	tests := []struct {
+		name    string
+		args    args
+		want    string
+		want1   string
+		wantErr bool
+	}{
+		{
+			name: "test cluster id=cluster-1",
+			args: args{
+				ctx:       ctx,
+				clusterID: "cluster-1",
+			},
+			want:    strings.Join(csiConfig[0].Monitors, ","),
+			want1:   "cluster-1",
+			wantErr: false,
+		},
+		{
+			name: "test cluster id=cluster-3",
+			args: args{
+				ctx:       ctx,
+				clusterID: "cluster-3",
+			},
+			want:    strings.Join(csiConfig[0].Monitors, ","),
+			want1:   "cluster-1",
+			wantErr: false,
+		},
+		{
+			name: "test cluster id=cluster-4",
+			args: args{
+				ctx:       ctx,
+				clusterID: "cluster-4",
+			},
+			want:    strings.Join(csiConfig[0].Monitors, ","),
+			want1:   "cluster-1",
+			wantErr: false,
+		},
+		{
+			name: "test missing cluster id=cluster-6",
+			args: args{
+				ctx:       ctx,
+				clusterID: "cluster-6",
+			},
+			want:    "",
+			want1:   "",
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, got1, err := fetchMappedClusterIDAndMons(ctx, tt.args.clusterID, clusterMappingConfigFile, csiConfigFile)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("FetchMappedClusterIDAndMons() error = %v, wantErr %v", err, tt.wantErr)
+
+				return
+			}
+			if got != tt.want {
+				t.Errorf("FetchMappedClusterIDAndMons() got = %v, want %v", got, tt.want)
+			}
+			if got1 != tt.want1 {
+				t.Errorf("FetchMappedClusterIDAndMons() got1 = %v, want %v", got1, tt.want1)
+			}
+		})
+	}
 }
