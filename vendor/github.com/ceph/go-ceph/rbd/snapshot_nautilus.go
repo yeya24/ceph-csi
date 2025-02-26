@@ -1,4 +1,3 @@
-// +build !luminous,!mimic
 //
 // Ceph Nautilus introduced rbd_get_parent() and deprecated rbd_get_parent_info().
 // Ceph Nautilus introduced rbd_list_children3() and deprecated rbd_list_children().
@@ -20,9 +19,10 @@ import (
 // and snapshot-name in the byte-arrays that are passed as arguments.
 //
 // Implements:
-//   int rbd_get_parent(rbd_image_t image,
-//                      rbd_linked_image_spec_t *parent_image,
-//                      rbd_snap_spec_t *parent_snap)
+//
+//	int rbd_get_parent(rbd_image_t image,
+//	                   rbd_linked_image_spec_t *parent_image,
+//	                   rbd_snap_spec_t *parent_snap)
 func (image *Image) GetParentInfo(pool, name, snapname []byte) error {
 	if err := image.validate(imageIsOpen); err != nil {
 		return err
@@ -32,7 +32,7 @@ func (image *Image) GetParentInfo(pool, name, snapname []byte) error {
 	parentSnap := C.rbd_snap_spec_t{}
 	ret := C.rbd_get_parent(image.image, &parentImage, &parentSnap)
 	if ret != 0 {
-		return rbdError(ret)
+		return getError(ret)
 	}
 
 	defer C.rbd_linked_image_spec_cleanup(&parentImage)
@@ -40,26 +40,26 @@ func (image *Image) GetParentInfo(pool, name, snapname []byte) error {
 
 	strlen := int(C.strlen(parentImage.pool_name))
 	if len(pool) < strlen {
-		return rbdError(C.ERANGE)
+		return getError(C.ERANGE)
 	}
 	if copy(pool, C.GoString(parentImage.pool_name)) != strlen {
-		return rbdError(C.ERANGE)
+		return getError(C.ERANGE)
 	}
 
 	strlen = int(C.strlen(parentImage.image_name))
 	if len(name) < strlen {
-		return rbdError(C.ERANGE)
+		return getError(C.ERANGE)
 	}
 	if copy(name, C.GoString(parentImage.image_name)) != strlen {
-		return rbdError(C.ERANGE)
+		return getError(C.ERANGE)
 	}
 
 	strlen = int(C.strlen(parentSnap.name))
 	if len(snapname) < strlen {
-		return rbdError(C.ERANGE)
+		return getError(C.ERANGE)
 	}
 	if copy(snapname, C.GoString(parentSnap.name)) != strlen {
-		return rbdError(C.ERANGE)
+		return getError(C.ERANGE)
 	}
 
 	return nil
@@ -67,8 +67,12 @@ func (image *Image) GetParentInfo(pool, name, snapname []byte) error {
 
 // ImageSpec represents the image information.
 type ImageSpec struct {
-	ImageName string
-	PoolName  string
+	ImageName     string
+	ImageID       string
+	PoolName      string
+	PoolNamespace string
+	PoolID        uint64
+	Trash         bool
 }
 
 // SnapSpec represents the snapshot infomation.
@@ -104,8 +108,12 @@ func (image *Image) GetParent() (*ParentInfo, error) {
 	defer C.rbd_snap_spec_cleanup(&parentSnap)
 
 	imageSpec := ImageSpec{
-		ImageName: C.GoString(parentImage.image_name),
-		PoolName:  C.GoString(parentImage.pool_name),
+		ImageName:     C.GoString(parentImage.image_name),
+		ImageID:       C.GoString(parentImage.image_id),
+		PoolName:      C.GoString(parentImage.pool_name),
+		PoolNamespace: C.GoString(parentImage.pool_namespace),
+		PoolID:        uint64(parentImage.pool_id),
+		Trash:         bool(parentImage.trash),
 	}
 
 	snapSpec := SnapSpec{
@@ -124,8 +132,9 @@ func (image *Image) GetParent() (*ParentInfo, error) {
 // used to link the two items together.
 //
 // Implements:
-//   int rbd_list_children3(rbd_image_t image, rbd_linked_image_spec_t *images,
-//                          size_t *max_images);
+//
+//	int rbd_list_children3(rbd_image_t image, rbd_linked_image_spec_t *images,
+//	                       size_t *max_images);
 func (image *Image) ListChildren() (pools []string, images []string, err error) {
 	if err := image.validate(imageIsOpen); err != nil {
 		return nil, nil, err
@@ -163,7 +172,8 @@ func (image *Image) ListChildren() (pools []string, images []string, err error) 
 // is the source of readable data.
 //
 // Implements:
-//  int rbd_snap_set_by_id(rbd_image_t image, uint64_t snap_id);
+//
+//	int rbd_snap_set_by_id(rbd_image_t image, uint64_t snap_id);
 func (image *Image) SetSnapByID(snapID uint64) error {
 	if err := image.validate(imageIsOpen); err != nil {
 		return err

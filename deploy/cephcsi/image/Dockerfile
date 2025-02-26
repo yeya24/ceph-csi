@@ -2,7 +2,24 @@ ARG SRC_DIR="/go/src/github.com/ceph/ceph-csi/"
 ARG GO_ARCH
 ARG BASE_IMAGE
 
-FROM ${BASE_IMAGE} as builder
+FROM ${BASE_IMAGE} as updated_base
+
+# TODO: remove the following cmd, when issues
+# https://github.com/ceph/ceph-container/issues/2034
+# https://github.com/ceph/ceph-container/issues/2141 are fixed.
+RUN true \
+    && dnf -y reinstall https://download.ceph.com/rpm-${CEPH_VERSION}/el9/noarch/ceph-release-1-1.el9.noarch.rpm \
+    && ( dnf config-manager --disable tcmu-runner,tcmu-runner-source,tcmu-runner-noarch,ceph-iscsi,ganesha || true ) \
+    && true
+
+RUN mkdir -p /etc/selinux && touch /etc/selinux/config
+
+RUN dnf -y update --nobest \
+       && dnf -y install nfs-utils \
+       && dnf clean all \
+       && rm -rf /var/cache/yum
+
+FROM updated_base as builder
 
 LABEL stage="build"
 
@@ -23,11 +40,16 @@ RUN source /build.env && \
 # test if the downloaded version of Golang works (different arch?)
 RUN ${GOROOT}/bin/go version && ${GOROOT}/bin/go env
 
-RUN dnf -y install \
-	librados-devel librbd-devel \
+# other/conflicting versions of protobuf get installed as dependency
+RUN dnf -y remove protobuf
+
+RUN dnf -y install --nodocs \
+	librados-devel librbd-devel libcephfs-devel \
 	/usr/bin/cc \
 	make \
 	git \
+	&& dnf clean all \
+	&& rm -rf /var/cache/yum \
     && true
 
 ENV GOROOT=${GOROOT} \
@@ -48,7 +70,7 @@ COPY . ${SRC_DIR}
 RUN make cephcsi
 
 #-- Final container
-FROM ${BASE_IMAGE}
+FROM updated_base
 
 ARG SRC_DIR
 

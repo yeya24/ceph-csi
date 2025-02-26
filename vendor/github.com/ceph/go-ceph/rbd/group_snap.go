@@ -29,9 +29,10 @@ import (
 // GroupSnapCreate will create a group snapshot.
 //
 // Implements:
-//  int rbd_group_snap_create(rados_ioctx_t group_p,
-//                            const char *group_name,
-//                            const char *snap_name);
+//
+//	int rbd_group_snap_create(rados_ioctx_t group_p,
+//	                          const char *group_name,
+//	                          const char *snap_name);
 func GroupSnapCreate(ioctx *rados.IOContext, group, snap string) error {
 	cGroupName := C.CString(group)
 	defer C.free(unsafe.Pointer(cGroupName))
@@ -45,9 +46,10 @@ func GroupSnapCreate(ioctx *rados.IOContext, group, snap string) error {
 // GroupSnapRemove removes an existing group snapshot.
 //
 // Implements:
-//  int rbd_group_snap_remove(rados_ioctx_t group_p,
-//                            const char *group_name,
-//                            const char *snap_name);
+//
+//	int rbd_group_snap_remove(rados_ioctx_t group_p,
+//	                          const char *group_name,
+//	                          const char *snap_name);
 func GroupSnapRemove(ioctx *rados.IOContext, group, snap string) error {
 	cGroupName := C.CString(group)
 	defer C.free(unsafe.Pointer(cGroupName))
@@ -61,10 +63,11 @@ func GroupSnapRemove(ioctx *rados.IOContext, group, snap string) error {
 // GroupSnapRename will rename an existing group snapshot.
 //
 // Implements:
-//  int rbd_group_snap_rename(rados_ioctx_t group_p,
-//                            const char *group_name,
-//                            const char *old_snap_name,
-//                            const char *new_snap_name);
+//
+//	int rbd_group_snap_rename(rados_ioctx_t group_p,
+//	                          const char *group_name,
+//	                          const char *old_snap_name,
+//	                          const char *new_snap_name);
 func GroupSnapRename(ioctx *rados.IOContext, group, src, dest string) error {
 	cGroupName := C.CString(group)
 	defer C.free(unsafe.Pointer(cGroupName))
@@ -88,21 +91,36 @@ const (
 	GroupSnapStateComplete = GroupSnapState(C.RBD_GROUP_SNAP_STATE_COMPLETE)
 )
 
-// GroupSnapInfo values are returned by GroupSnapList, representing the
-// snapshots that are part of an rbd group.
+// GroupSnap contains the information of a single snapshot that is part of a
+// group snapshot.
+type GroupSnap struct {
+	Name   string
+	PoolID uint64
+	SnapID uint64
+}
+
+// GroupSnapInfo values are returned by GroupSnapList and GroupSnapGetInfo,
+// representing the group snapshots that are created of an rbd group.
+// SnapName, ID and Snapshots are only set by the GroupSnapGetInfo function.
 type GroupSnapInfo struct {
 	Name  string
 	State GroupSnapState
+
+	SnapName string
+	ID       string
+
+	Snapshots []GroupSnap
 }
 
 // GroupSnapList returns a slice of snapshots in a group.
 //
 // Implements:
-//  int rbd_group_snap_list(rados_ioctx_t group_p,
-//                          const char *group_name,
-//                          rbd_group_snap_info_t *snaps,
-//                          size_t group_snap_info_size,
-//                          size_t *num_entries);
+//
+//	int rbd_group_snap_list(rados_ioctx_t group_p,
+//	                        const char *group_name,
+//	                        rbd_group_snap_info_t *snaps,
+//	                        size_t group_snap_info_size,
+//	                        size_t *num_entries);
 func GroupSnapList(ioctx *rados.IOContext, group string) ([]GroupSnapInfo, error) {
 	cGroupName := C.CString(group)
 	defer C.free(unsafe.Pointer(cGroupName))
@@ -147,9 +165,10 @@ func GroupSnapList(ioctx *rados.IOContext, group string) ([]GroupSnapInfo, error
 // given snapshot.
 //
 // Implements:
-//  int rbd_group_snap_rollback(rados_ioctx_t group_p,
-//                              const char *group_name,
-//                              const char *snap_name);
+//
+//	int rbd_group_snap_rollback(rados_ioctx_t group_p,
+//	                            const char *group_name,
+//	                            const char *snap_name);
 func GroupSnapRollback(ioctx *rados.IOContext, group, snap string) error {
 	cGroupName := C.CString(group)
 	defer C.free(unsafe.Pointer(cGroupName))
@@ -174,17 +193,18 @@ var groupSnapRollbackCallbacks = callbacks.New()
 // to report on the progress of the snapshot rollback.
 //
 // Implements:
-//  int rbd_group_snap_rollback_with_progress(rados_ioctx_t group_p,
-//                                            const char *group_name,
-//                                            const char *snap_name,
-//                                            librbd_progress_fn_t cb,
-//                                            void *cbdata);
+//
+//	int rbd_group_snap_rollback_with_progress(rados_ioctx_t group_p,
+//	                                          const char *group_name,
+//	                                          const char *snap_name,
+//	                                          librbd_progress_fn_t cb,
+//	                                          void *cbdata);
 func GroupSnapRollbackWithProgress(
 	ioctx *rados.IOContext, group, snap string,
 	cb GroupSnapRollbackCallback, data interface{}) error {
 	// the provided callback must be a real function
 	if cb == nil {
-		return rbdError(C.EINVAL)
+		return getError(C.EINVAL)
 	}
 
 	cGroupName := C.CString(group)
@@ -197,7 +217,7 @@ func GroupSnapRollbackWithProgress(
 		data:     data,
 	}
 	cbIndex := groupSnapRollbackCallbacks.Add(ctx)
-	defer diffIterateCallbacks.Remove(cbIndex)
+	defer groupSnapRollbackCallbacks.Remove(cbIndex)
 
 	ret := C.wrap_rbd_group_snap_rollback_with_progress(
 		cephIoctx(ioctx),

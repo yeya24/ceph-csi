@@ -22,6 +22,7 @@ import (
 	"time"
 
 	ca "github.com/ceph/go-ceph/cephfs/admin"
+	"github.com/ceph/go-ceph/common/admin/nfs"
 	"github.com/ceph/go-ceph/rados"
 	ra "github.com/ceph/go-ceph/rbd/admin"
 )
@@ -95,7 +96,7 @@ func (cc *ClusterConnection) GetIoctx(pool string) (*rados.IOContext, error) {
 	if err != nil {
 		// ErrNotFound indicates the Pool was not found
 		if errors.Is(err, rados.ErrNotFound) {
-			err = JoinErrors(ErrPoolNotFound, err)
+			err = fmt.Errorf("Failed as %w (internal %w)", ErrPoolNotFound, err)
 		} else {
 			err = fmt.Errorf("failed to open IOContext for pool %s: %w", pool, err)
 		}
@@ -114,6 +115,14 @@ func (cc *ClusterConnection) GetFSAdmin() (*ca.FSAdmin, error) {
 	return ca.NewFromConn(cc.conn), nil
 }
 
+func (cc *ClusterConnection) GetFSID() (string, error) {
+	if cc.conn == nil {
+		return "", errors.New("cluster is not connected yet")
+	}
+
+	return cc.conn.GetFSID()
+}
+
 // GetRBDAdmin get RBDAdmin to administrate rbd volumes.
 func (cc *ClusterConnection) GetRBDAdmin() (*ra.RBDAdmin, error) {
 	if cc.conn == nil {
@@ -123,22 +132,32 @@ func (cc *ClusterConnection) GetRBDAdmin() (*ra.RBDAdmin, error) {
 	return ra.NewFromConn(cc.conn), nil
 }
 
-// DisableDiscardOnZeroedWriteSame enables the
-// `rbd_discard_on_zeroed_write_same` option in the cluster connection, so that
-// writing zero blocks of data are actual writes on the OSDs (doing
-// allocations) and not discard calls. This makes writes much slower, but
-// enables the option to do thick-provisioning.
-func (cc *ClusterConnection) DisableDiscardOnZeroedWriteSame() error {
-	if cc.discardOnZeroedWriteSameDisabled {
-		return nil
-	}
-
-	err := cc.conn.SetConfigOption("rbd_discard_on_zeroed_write_same", "false")
+// GetTaskAdmin returns TaskAdmin to add tasks on rbd images.
+func (cc *ClusterConnection) GetTaskAdmin() (*ra.TaskAdmin, error) {
+	rbdAdmin, err := cc.GetRBDAdmin()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	cc.discardOnZeroedWriteSameDisabled = true
+	return rbdAdmin.Task(), nil
+}
 
-	return nil
+// GetNFSAdmin returns an Admin type that can be used to interact with the
+// NFS-cluster that is managed by Ceph.
+func (cc *ClusterConnection) GetNFSAdmin() (*nfs.Admin, error) {
+	if cc.conn == nil {
+		return nil, errors.New("cluster is not connected yet")
+	}
+
+	return nfs.NewFromConn(cc.conn), nil
+}
+
+// GetAddrs returns the addresses of the RADOS session,
+// suitable for blocklisting.
+func (cc *ClusterConnection) GetAddrs() (string, error) {
+	if cc.conn == nil {
+		return "", errors.New("cluster is not connected yet")
+	}
+
+	return cc.conn.GetAddrs()
 }

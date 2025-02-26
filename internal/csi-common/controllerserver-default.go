@@ -19,7 +19,7 @@ package csicommon
 import (
 	"context"
 
-	"github.com/ceph/ceph-csi/internal/util"
+	"github.com/ceph/ceph-csi/internal/util/log"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -28,50 +28,18 @@ import (
 
 // DefaultControllerServer points to default driver.
 type DefaultControllerServer struct {
+	csi.UnimplementedControllerServer
+	csi.UnimplementedGroupControllerServer
 	Driver *CSIDriver
-}
-
-// ControllerPublishVolume publish volume on node.
-func (cs *DefaultControllerServer) ControllerPublishVolume(
-	ctx context.Context,
-	req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "")
-}
-
-// ControllerUnpublishVolume unpublish on node.
-func (cs *DefaultControllerServer) ControllerUnpublishVolume(
-	ctx context.Context,
-	req *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "")
-}
-
-// ControllerExpandVolume expand volume.
-func (cs *DefaultControllerServer) ControllerExpandVolume(
-	ctx context.Context,
-	req *csi.ControllerExpandVolumeRequest) (*csi.ControllerExpandVolumeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "")
-}
-
-// ListVolumes lists volumes.
-func (cs *DefaultControllerServer) ListVolumes(
-	ctx context.Context,
-	req *csi.ListVolumesRequest) (*csi.ListVolumesResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "")
-}
-
-// GetCapacity get volume capacity.
-func (cs *DefaultControllerServer) GetCapacity(
-	ctx context.Context,
-	req *csi.GetCapacityRequest) (*csi.GetCapacityResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "")
 }
 
 // ControllerGetCapabilities implements the default GRPC callout.
 // Default supports all capabilities.
 func (cs *DefaultControllerServer) ControllerGetCapabilities(
 	ctx context.Context,
-	req *csi.ControllerGetCapabilitiesRequest) (*csi.ControllerGetCapabilitiesResponse, error) {
-	util.TraceLog(ctx, "Using default ControllerGetCapabilities")
+	req *csi.ControllerGetCapabilitiesRequest,
+) (*csi.ControllerGetCapabilitiesResponse, error) {
+	log.TraceLog(ctx, "Using default ControllerGetCapabilities")
 	if cs.Driver == nil {
 		return nil, status.Error(codes.Unimplemented, "Controller server is not enabled")
 	}
@@ -81,30 +49,18 @@ func (cs *DefaultControllerServer) ControllerGetCapabilities(
 	}, nil
 }
 
-// CreateSnapshot creates snapshot.
-func (cs *DefaultControllerServer) CreateSnapshot(
+// GroupControllerGetCapabilities implements the default
+// GroupControllerGetCapabilities GRPC callout.
+func (cs *DefaultControllerServer) GroupControllerGetCapabilities(
 	ctx context.Context,
-	req *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "")
-}
+	req *csi.GroupControllerGetCapabilitiesRequest,
+) (*csi.GroupControllerGetCapabilitiesResponse, error) {
+	log.TraceLog(ctx, "Using default GroupControllerGetCapabilities")
+	if cs.Driver == nil {
+		return nil, status.Error(codes.Unimplemented, "Group controller server is not enabled")
+	}
 
-// DeleteSnapshot deletes snapshot.
-func (cs *DefaultControllerServer) DeleteSnapshot(
-	ctx context.Context,
-	req *csi.DeleteSnapshotRequest) (*csi.DeleteSnapshotResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "")
-}
-
-// ListSnapshots lists snapshots.
-func (cs *DefaultControllerServer) ListSnapshots(
-	ctx context.Context,
-	req *csi.ListSnapshotsRequest) (*csi.ListSnapshotsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "")
-}
-
-// ControllerGetVolume fetch volume information.
-func (cs *DefaultControllerServer) ControllerGetVolume(
-	ctx context.Context,
-	req *csi.ControllerGetVolumeRequest) (*csi.ControllerGetVolumeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "")
+	return &csi.GroupControllerGetCapabilitiesResponse{
+		Capabilities: cs.Driver.groupCapabilities,
+	}, nil
 }

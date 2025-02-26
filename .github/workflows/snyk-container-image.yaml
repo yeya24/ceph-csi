@@ -1,0 +1,46 @@
+---
+# A workflow which checks out the code, builds a container
+# image using Docker and scans that image for vulnerabilities using
+# Snyk. The results are then uploaded to GitHub Security Code Scanning
+#
+# For more examples, including how to limit scans to only high-severity
+# issues, monitor images for newly disclosed vulnerabilities in Snyk and
+# fail PR checks for new vulnerabilities, see https://github.com/snyk/actions/
+name: Snyk Container
+# yamllint disable-line rule:truthy
+on:
+  schedule:
+    # Run weekly on every Monday
+    - cron: '0 0 * * 1'
+  push:
+    tags:
+      - v*
+    branches:
+      - release-*
+
+permissions:
+  contents: read
+
+jobs:
+  snyk:
+    if: github.repository == 'ceph/ceph-csi'
+    runs-on: ubuntu-latest
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: Build a Docker image
+        run: make image-cephcsi
+      - name: Run Snyk to check Docker image for vulnerabilities
+        continue-on-error: true
+        # yamllint disable-line rule:line-length
+        uses: snyk/actions/docker@cdb760004ba9ea4d525f2e043745dfe85bb9077e  # master
+        env:
+          SNYK_TOKEN: ${{ secrets.SYNK_TOKEN }}
+        with:
+          image: quay.io/cephcsi/cephcsi:${{ github.base_ref }}
+          args: --file=./deploy/cephcsi/image/Dockerfile
+      - name: Upload result to GitHub Code Scanning
+        # yamllint disable-line rule:line-length
+        uses: github/codeql-action/upload-sarif@08bc0cf022445eacafaa248bf48da20f26b8fd40  # v3.28.6
+        with:
+          sarif_file: snyk.sarif

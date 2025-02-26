@@ -22,6 +22,8 @@ import (
 	"fmt"
 
 	"github.com/ceph/ceph-csi/internal/util"
+	"github.com/ceph/ceph-csi/internal/util/k8s"
+	"github.com/ceph/ceph-csi/internal/util/log"
 
 	librbd "github.com/ceph/go-ceph/rbd"
 	"google.golang.org/grpc/codes"
@@ -45,10 +47,10 @@ import (
 func (rv *rbdVolume) checkCloneImage(ctx context.Context, parentVol *rbdVolume) (bool, error) {
 	// generate temp cloned volume
 	tempClone := rv.generateTempClone()
-	defer tempClone.Destroy()
+	defer tempClone.Destroy(ctx)
 
 	snap := &rbdSnapshot{}
-	defer snap.Destroy()
+	defer snap.Destroy(ctx)
 	snap.RbdSnapName = rv.RbdImageName
 	snap.Pool = rv.Pool
 
@@ -56,27 +58,16 @@ func (rv *rbdVolume) checkCloneImage(ctx context.Context, parentVol *rbdVolume) 
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrSnapNotFound):
-			// check temporary image needs flatten, if yes add task to flatten the
-			// temporary clone
-			err = tempClone.flattenRbdImage(ctx, rv.conn.Creds, false, rbdHardMaxCloneDepth, rbdSoftMaxCloneDepth)
-			if err != nil {
-				return false, err
-			}
 			// as the snapshot is not present, create new snapshot,clone and
 			// delete the temporary snapshot
-			err = createRBDClone(ctx, tempClone, rv, snap, rv.conn.Creds)
-			if err != nil {
-				return false, err
-			}
-			// check image needs flatten, if yes add task to flatten the clone
-			err = rv.flattenRbdImage(ctx, rv.conn.Creds, false, rbdHardMaxCloneDepth, rbdSoftMaxCloneDepth)
+			err = createRBDClone(ctx, tempClone, rv, snap)
 			if err != nil {
 				return false, err
 			}
 
 			return true, nil
 
-		case errors.Is(err, ErrImageNotFound):
+		case errors.Is(err, util.ErrImageNotFound):
 			// as the temp clone does not exist,check snapshot exists on parent volume
 			// snapshot name is same as temporary clone image
 			snap.RbdImageName = tempClone.RbdImageName
@@ -103,20 +94,15 @@ func (rv *rbdVolume) checkCloneImage(ctx context.Context, parentVol *rbdVolume) 
 	// and add task to flatten temporary cloned image
 	err = rv.cloneRbdImageFromSnapshot(ctx, snap, parentVol)
 	if err != nil {
-		util.ErrorLog(ctx, "failed to clone rbd image %s from snapshot %s: %v", rv.RbdImageName, snap.RbdSnapName, err)
+		log.ErrorLog(ctx, "failed to clone rbd image %s from snapshot %s: %v", rv.RbdImageName, snap.RbdSnapName, err)
 		err = fmt.Errorf("failed to clone rbd image %s from snapshot %s: %w", rv.RbdImageName, snap.RbdSnapName, err)
 
 		return false, err
 	}
 	err = tempClone.deleteSnapshot(ctx, snap)
 	if err != nil {
-		util.ErrorLog(ctx, "failed to delete snapshot: %v", err)
+		log.ErrorLog(ctx, "failed to delete snapshot: %v", err)
 
-		return false, err
-	}
-	// check image needs flatten, if yes add task to flatten the clone
-	err = rv.flattenRbdImage(ctx, rv.conn.Creds, false, rbdHardMaxCloneDepth, rbdSoftMaxCloneDepth)
-	if err != nil {
 		return false, err
 	}
 
@@ -128,7 +114,7 @@ func (rv *rbdVolume) generateTempClone() *rbdVolume {
 	tempClone.conn = rv.conn.Copy()
 	// The temp clone image need to have deep flatten feature
 	f := []string{librbd.FeatureNameLayering, librbd.FeatureNameDeepFlatten}
-	tempClone.imageFeatureSet = librbd.FeatureSetFromNames(f)
+	tempClone.ImageFeatureSet = librbd.FeatureSetFromNames(f)
 	tempClone.ClusterID = rv.ClusterID
 	tempClone.Monitors = rv.Monitors
 	tempClone.Pool = rv.Pool
@@ -153,30 +139,47 @@ func (rv *rbdVolume) createCloneFromImage(ctx context.Context, parentVol *rbdVol
 		return err
 	}
 
+	defer func() {
+		if err != nil {
+			log.DebugLog(ctx, "Removing clone image %q", rv)
+			errDefer := rv.Delete(ctx)
+			if errDefer != nil {
+				log.ErrorLog(ctx, "failed to delete clone image %q: %v", rv, errDefer)
+			}
+		}
+	}()
+
 	err = rv.getImageID()
 	if err != nil {
-		util.ErrorLog(ctx, "failed to get volume id %s: %v", rv, err)
+		log.ErrorLog(ctx, "failed to get volume id %s: %v", rv, err)
 
 		return err
 	}
 
-	if parentVol.isEncrypted() {
-		err = parentVol.copyEncryptionConfig(&rv.rbdImage)
-		if err != nil {
-			return fmt.Errorf("failed to copy encryption config for %q: %w", rv, err)
-		}
-	}
-
-	if rv.ThickProvision {
-		err = rv.setThickProvisioned()
-		if err != nil {
-			return fmt.Errorf("failed mark %q thick-provisioned: %w", rv, err)
-		}
+	err = parentVol.copyEncryptionConfig(ctx, &rv.rbdImage, true)
+	if err != nil {
+		return fmt.Errorf("failed to copy encryption config for %q: %w", rv, err)
 	}
 
 	err = j.StoreImageID(ctx, rv.JournalPool, rv.ReservedID, rv.ImageID)
 	if err != nil {
-		util.ErrorLog(ctx, "failed to store volume %s: %v", rv, err)
+		log.ErrorLog(ctx, "failed to store volume %s: %v", rv, err)
+
+		return err
+	}
+
+	// expand the image if the requested size is greater than the current size
+	err = rv.expand()
+	if err != nil {
+		log.ErrorLog(ctx, "failed to resize volume %s: %v", rv, err)
+
+		return err
+	}
+
+	// adjust rbd qos after resize volume.
+	err = rv.AdjustQOS(ctx)
+	if err != nil {
+		log.ErrorLog(ctx, "failed adjust QOS for rbd image")
 
 		return err
 	}
@@ -185,13 +188,12 @@ func (rv *rbdVolume) createCloneFromImage(ctx context.Context, parentVol *rbdVol
 }
 
 func (rv *rbdVolume) doSnapClone(ctx context.Context, parentVol *rbdVolume) error {
-	var (
-		errClone   error
-		errFlatten error
-	)
+	var errClone error
 
 	// generate temp cloned volume
 	tempClone := rv.generateTempClone()
+	defer tempClone.Destroy(ctx)
+
 	// snapshot name is same as temporary cloned image, This helps to
 	// flatten the temporary cloned images as we cannot have more than 510
 	// snapshots on an rbd image
@@ -204,87 +206,47 @@ func (rv *rbdVolume) doSnapClone(ctx context.Context, parentVol *rbdVolume) erro
 	cloneSnap.Pool = rv.Pool
 
 	// create snapshot and temporary clone and delete snapshot
-	err := createRBDClone(ctx, parentVol, tempClone, tempSnap, rv.conn.Creds)
+	err := createRBDClone(ctx, parentVol, tempClone, tempSnap)
 	if err != nil {
 		return err
 	}
 
 	defer func() {
 		if err != nil || errClone != nil {
-			cErr := cleanUpSnapshot(ctx, tempClone, cloneSnap, rv, rv.conn.Creds)
+			cErr := cleanUpSnapshot(ctx, tempClone, cloneSnap, rv)
 			if cErr != nil {
-				util.ErrorLog(ctx, "failed to cleanup image %s or snapshot %s: %v", cloneSnap, tempClone, cErr)
+				log.ErrorLog(ctx, "failed to cleanup image %s or snapshot %s: %v", cloneSnap, tempClone, cErr)
 			}
 		}
 
-		if err != nil || errFlatten != nil {
-			if !errors.Is(errFlatten, ErrFlattenInProgress) {
-				// cleanup snapshot
-				cErr := cleanUpSnapshot(ctx, parentVol, tempSnap, tempClone, rv.conn.Creds)
-				if cErr != nil {
-					util.ErrorLog(ctx, "failed to cleanup image %s or snapshot %s: %v", tempSnap, tempClone, cErr)
-				}
+		if err != nil {
+			// cleanup snapshot
+			cErr := cleanUpSnapshot(ctx, parentVol, tempSnap, tempClone)
+			if cErr != nil {
+				log.ErrorLog(ctx, "failed to cleanup image %s or snapshot %s: %v", tempClone, tempSnap, cErr)
 			}
 		}
 	}()
 
-	if rv.ThickProvision {
-		err = tempClone.DeepCopy(rv)
-		if err != nil {
-			return fmt.Errorf("failed to deep copy %q into %q: %w", parentVol, rv, err)
-		}
-	} else {
-		// flatten clone
-		errFlatten = tempClone.flattenRbdImage(ctx, rv.conn.Creds, false, rbdHardMaxCloneDepth, rbdSoftMaxCloneDepth)
-		if errFlatten != nil {
-			return errFlatten
-		}
+	err = tempClone.unsetAllMetadata(k8s.GetVolumeMetadataKeys())
+	if err != nil {
+		log.ErrorLog(ctx, "failed to unset volume metadata on temp clone image %q: %v", tempClone, err)
 
-		// create snap of temp clone from temporary cloned image
-		// create final clone
-		// delete snap of temp clone
-		errClone = createRBDClone(ctx, tempClone, rv, cloneSnap, rv.conn.Creds)
-		if errClone != nil {
-			// set errFlatten error to cleanup temporary snapshot and temporary clone
-			errFlatten = errors.New("failed to create user requested cloned image")
-
-			return errClone
-		}
-	}
-
-	return nil
-}
-
-func (rv *rbdVolume) flattenCloneImage(ctx context.Context) error {
-	if rv.ThickProvision {
-		// thick-provisioned images do not need flattening
-		return nil
-	}
-
-	tempClone := rv.generateTempClone()
-	// reducing the limit for cloned images to make sure the limit is in range,
-	// If the intermediate clone reaches the depth we may need to return ABORT
-	// error message as it need to be flatten before continuing, this may leak
-	// omap entries and stale temporary snapshots in corner cases, if we reduce
-	// the limit and check for the depth of the parent image clain itself we
-	// can flatten the parent images before used to avoid the stale omap entries.
-	hardLimit := rbdHardMaxCloneDepth
-	softLimit := rbdSoftMaxCloneDepth
-	// choosing 2 so that we don't need to flatten the image in the request.
-	const depthToAvoidFlatten = 2
-	if rbdHardMaxCloneDepth > depthToAvoidFlatten {
-		hardLimit = rbdHardMaxCloneDepth - depthToAvoidFlatten
-	}
-	if rbdSoftMaxCloneDepth > depthToAvoidFlatten {
-		softLimit = rbdSoftMaxCloneDepth - depthToAvoidFlatten
-	}
-	err := tempClone.getImageInfo()
-	if err == nil {
-		return tempClone.flattenRbdImage(ctx, tempClone.conn.Creds, false, hardLimit, softLimit)
-	}
-	if !errors.Is(err, ErrImageNotFound) {
 		return err
 	}
 
-	return rv.flattenRbdImage(ctx, rv.conn.Creds, false, hardLimit, softLimit)
+	// create snap of temp clone from temporary cloned image
+	// create final clone
+	// delete snap of temp clone
+	errClone = createRBDClone(ctx, tempClone, rv, cloneSnap)
+	if errClone != nil {
+		return errClone
+	}
+
+	err = parentVol.copyEncryptionConfig(ctx, &rv.rbdImage, true)
+	if err != nil {
+		return fmt.Errorf("failed to copy encryption config for %q: %w", rv, err)
+	}
+
+	return nil
 }

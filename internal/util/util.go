@@ -23,13 +23,17 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/ceph/ceph-csi/internal/util/k8s"
+	"github.com/ceph/ceph-csi/internal/util/log"
 
 	"golang.org/x/sys/unix"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/cloud-provider/volume/helpers"
-	"k8s.io/utils/mount"
+	mount "k8s.io/mount-utils"
 )
 
 // RoundOffVolSize rounds up given quantity up to chunks of MiB/GiB.
@@ -56,6 +60,22 @@ func RoundOffBytes(bytes int64) int64 {
 	return num
 }
 
+// RoundOffCephFSVolSize rounds up the bytes to 4MiB if the request is less
+// than 4MiB or if its greater it rounds up to multiple of 4MiB.
+func RoundOffCephFSVolSize(bytes int64) int64 {
+	// Minimum supported size is 1MiB in CephCSI, if the request is <4MiB,
+	// round off to 4MiB.
+	if bytes < helpers.MiB {
+		return 4 * helpers.MiB
+	}
+
+	bytesInFloat := float64(bytes) / helpers.MiB
+
+	bytes = int64(math.Ceil(bytesInFloat/4) * 4)
+
+	return RoundOffBytes(bytes * helpers.MiB)
+}
+
 // variables which will be set during the build time.
 var (
 	// GitCommit tell the latest git commit image is built from.
@@ -75,29 +95,19 @@ type Config struct {
 	PluginPath      string // location of cephcsi plugin
 	StagingPath     string // location of cephcsi staging path
 	DomainLabels    string // list of domain labels to read from the node
-
 	// metrics related flags
-	MetricsPath     string // path of prometheus endpoint where metrics will be available
-	HistogramOption string // Histogram option for grpc metrics, should be comma separated value,
-	// ex:= "0.5,2,6" where start=0.5 factor=2, count=6
-	MetricsIP         string        // TCP port for liveness/ metrics requests
-	PidLimit          int           // PID limit to configure through cgroups")
-	MetricsPort       int           // TCP port for liveness/grpc metrics requests
-	PollTime          time.Duration // time interval in seconds between each poll
-	PoolTimeout       time.Duration // probe timeout in seconds
-	EnableGRPCMetrics bool          // option to enable grpc metrics
+	MetricsPath string // path of prometheus endpoint where metrics will be available
+	MetricsIP   string // TCP port for liveness/ metrics requests
 
-	EnableProfiling    bool // flag to enable profiling
-	IsControllerServer bool // if set to true start provisoner server
-	IsNodeServer       bool // if set to true start node server
-	Version            bool // cephcsi version
+	// CSI-Addons endpoint
+	CSIAddonsEndpoint string
 
-	// SkipForceFlatten is set to false if the kernel supports mounting of
-	// rbd image or the image chain has the deep-flatten feature.
-	SkipForceFlatten bool
+	// Cluster name
+	ClusterName string
 
-	// cephfs related flags
-	ForceKernelCephFS bool // force to use the ceph kernel client even if the kernel is < 4.17
+	// mount option related flags
+	KernelMountOptions string // Comma separated string of mount options accepted by cephfs kernel mounter
+	FuseMountOptions   string // Comma separated string of mount options accepted by ceph-fuse mounter
 
 	// RbdHardMaxCloneDepth is the hard limit for maximum number of nested volume clones that are taken before a flatten
 	// occurs
@@ -116,6 +126,32 @@ type Config struct {
 	// snapshots allowed on rbd image without flattening, once the soft limit is
 	// reached cephcsi will start flattening the older rbd images.
 	MinSnapshotsOnImage uint
+
+	PidLimit    int           // PID limit to configure through cgroups")
+	MetricsPort int           // TCP port for liveness/grpc metrics requests
+	PollTime    time.Duration // time interval in seconds between each poll
+	PoolTimeout time.Duration // probe timeout in seconds
+	// Log interval for slow GRPC calls. Calls that outlive their context deadline
+	// are considered slow.
+	LogSlowOpInterval time.Duration
+
+	EnableProfiling    bool // flag to enable profiling
+	IsControllerServer bool // if set to true start provisioner server
+	IsNodeServer       bool // if set to true start node server
+	Version            bool // cephcsi version
+
+	// SkipForceFlatten is set to false if the kernel supports mounting of
+	// rbd image or the image chain has the deep-flatten feature.
+	SkipForceFlatten bool
+
+	// cephfs related flags
+	ForceKernelCephFS    bool   // force to use the ceph kernel client even if the kernel is < 4.17
+	RadosNamespaceCephFS string // RadosNamespace used to store CSI specific objects and keys
+	SetMetadata          bool   // set metadata on the volume
+
+	// Read affinity related options
+	EnableReadAffinity  bool   // enable OSD read affinity.
+	CrushLocationLabels string // list of CRUSH location labels to read from the node.
 }
 
 // ValidateDriverName validates the driver name.
@@ -159,7 +195,7 @@ type KernelVersion struct {
 	SubLevel     int
 	ExtraVersion int    // prefix of the part after the first "-"
 	Distribution string // component of full extraversion
-	Backport     bool   // backports have a fixed version/patchlevel/sublevel
+	Backport     bool   // backport have a fixed version/patchlevel/sublevel
 }
 
 // parseKernelRelease parses a kernel release version string into:
@@ -179,7 +215,7 @@ func parseKernelRelease(release string) (int, int, int, int, error) {
 	extraversion := 0
 	if n > minVersions {
 		n, err = fmt.Sscanf(extra, ".%d%s", &sublevel, &extra)
-		if err != nil && n == 0 && len(extra) > 0 && extra[0] != '-' && extra[0] == '.' {
+		if err != nil && n == 0 && extra != "" && extra[0] != '-' && extra[0] == '.' {
 			return 0, 0, 0, 0, fmt.Errorf("failed to parse subversion from %s: %w", release, err)
 		}
 
@@ -197,9 +233,9 @@ func parseKernelRelease(release string) (int, int, int, int, error) {
 
 // CheckKernelSupport checks the running kernel and comparing it to known
 // versions that have support for required features . Distributors of
-// enterprise Linux have backported quota support to previous versions. This
+// enterprise Linux have backport quota support to previous versions. This
 // function checks if the running kernel is one of the versions that have the
-// feature/fixes backported.
+// feature/fixes backport.
 //
 // `uname -r` (or Uname().Utsname.Release has a format like 1.2.3-rc.vendor
 // This can be slit up in the following components: - version (1) - patchlevel
@@ -216,7 +252,7 @@ func parseKernelRelease(release string) (int, int, int, int, error) {
 func CheckKernelSupport(release string, supportedVersions []KernelVersion) bool {
 	version, patchlevel, sublevel, extraversion, err := parseKernelRelease(release)
 	if err != nil {
-		ErrorLogMsg("%v", err)
+		log.ErrorLogMsg("%v", err)
 
 		return false
 	}
@@ -242,7 +278,7 @@ func CheckKernelSupport(release string, supportedVersions []KernelVersion) bool 
 			}
 		}
 	}
-	ErrorLogMsg("kernel %s does not support required features", release)
+	log.WarningLogMsg("kernel %s does not support required features", release)
 
 	return false
 }
@@ -255,7 +291,7 @@ func GenerateVolID(
 	cr *Credentials,
 	locationID int64,
 	pool, clusterID, objUUID string,
-	volIDVersion uint16) (string, error) {
+) (string, error) {
 	var err error
 
 	if locationID == InvalidPoolID {
@@ -267,10 +303,9 @@ func GenerateVolID(
 
 	// generate the volume ID to return to the CO system
 	vi := CSIIdentifier{
-		LocationID:      locationID,
-		EncodingVersion: volIDVersion,
-		ClusterID:       clusterID,
-		ObjectUUID:      objUUID,
+		LocationID: locationID,
+		ClusterID:  clusterID,
+		ObjectUUID: objUUID,
 	}
 
 	volID, err := vi.ComposeCSIID()
@@ -293,9 +328,8 @@ func checkDirExists(p string) bool {
 }
 
 // IsMountPoint checks if the given path is mountpoint or not.
-func IsMountPoint(p string) (bool, error) {
-	dummyMount := mount.New("")
-	notMnt, err := dummyMount.IsLikelyNotMountPoint(p)
+func IsMountPoint(mounter mount.Interface, p string) (bool, error) {
+	notMnt, err := mounter.IsLikelyNotMountPoint(p)
 	if err != nil {
 		return false, err
 	}
@@ -303,11 +337,15 @@ func IsMountPoint(p string) (bool, error) {
 	return !notMnt, nil
 }
 
-// Mount mounts the source to target path.
-func Mount(source, target, fstype string, options []string) error {
-	dummyMount := mount.New("")
+// IsCorruptedMountError checks if the given error is a result of a corrupted
+// mountpoint.
+func IsCorruptedMountError(err error) bool {
+	return mount.IsCorruptedMnt(err)
+}
 
-	return dummyMount.Mount(source, target, fstype, options)
+// Mount mounts the source to target path.
+func Mount(mounter mount.Interface, source, target, fstype string, options []string) error {
+	return mounter.MountSensitiveWithoutSystemd(source, target, fstype, options, nil)
 }
 
 // MountOptionsAdd adds the `add` mount options to the `options` and returns a
@@ -324,36 +362,12 @@ func MountOptionsAdd(options string, add ...string) string {
 	}
 
 	for _, opt := range add {
-		if opt != "" && !contains(newOpts, opt) {
+		if opt != "" && !slices.Contains(newOpts, opt) {
 			newOpts = append(newOpts, opt)
 		}
 	}
 
 	return strings.Join(newOpts, ",")
-}
-
-func contains(s []string, key string) bool {
-	for _, v := range s {
-		if v == key {
-			return true
-		}
-	}
-
-	return false
-}
-
-// getKeys takes a map that uses strings for keys and returns a slice with the
-// keys.
-func getKeys(m map[string]interface{}) []string {
-	keys := make([]string, len(m))
-
-	i := 0
-	for k := range m {
-		keys[i] = k
-		i++
-	}
-
-	return keys
 }
 
 // CallStack returns the stack of the calls in the current goroutine. Useful
@@ -364,4 +378,24 @@ func CallStack() string {
 	_ = runtime.Stack(stack, false)
 
 	return string(stack)
+}
+
+// GetVolumeContext filters out parameters that are not required in volume context.
+func GetVolumeContext(parameters map[string]string) map[string]string {
+	volumeContext := map[string]string{}
+
+	// parameters that are not required in the volume context
+	notRequiredParams := []string{
+		topologyPoolsParam,
+	}
+	for k, v := range parameters {
+		if !slices.Contains(notRequiredParams, k) {
+			volumeContext[k] = v
+		}
+	}
+
+	// remove kubernetes csi prefixed parameters.
+	volumeContext = k8s.RemoveCSIPrefixedParameters(volumeContext)
+
+	return volumeContext
 }

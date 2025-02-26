@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The Ceph-CSI Authors.
+Copyright 2022 The Ceph-CSI Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,53 +17,152 @@ limitations under the License.
 package rbd
 
 import (
+	"context"
 	"testing"
-
-	"github.com/container-storage-interface/spec/lib/go/csi"
 )
 
-func TestIsThickProvisionRequest(t *testing.T) {
+func TestValidateStriping(t *testing.T) {
 	t.Parallel()
-	req := &csi.CreateVolumeRequest{
-		Name: "fake",
-		Parameters: map[string]string{
-			"unkownOption": "not-set",
+	tests := []struct {
+		name       string
+		parameters map[string]string
+		wantErr    bool
+	}{
+		{
+			name: "when stripeUnit is not specified",
+			parameters: map[string]string{
+				"stripeUnit":  "",
+				"stripeCount": "10",
+				"objectSize":  "2",
+			},
+			wantErr: true,
+		},
+		{
+			name: "when stripeCount is not specified",
+			parameters: map[string]string{
+				"stripeUnit":  "4096",
+				"stripeCount": "",
+				"objectSize":  "2",
+			},
+			wantErr: true,
+		},
+		{
+			name: "when objectSize is not power of 2",
+			parameters: map[string]string{
+				"stripeUnit":  "4096",
+				"stripeCount": "8",
+				"objectSize":  "3",
+			},
+			wantErr: true,
+		},
+		{
+			name: "when objectSize is 0",
+			parameters: map[string]string{
+				"stripeUnit":  "4096",
+				"stripeCount": "8",
+				"objectSize":  "0",
+			},
+			wantErr: true,
+		},
+		{
+			name: "when valid stripe parameters are specified",
+			parameters: map[string]string{
+				"stripeUnit":  "4096",
+				"stripeCount": "8",
+				"objectSize":  "131072",
+			},
+			wantErr: false,
+		},
+		{
+			name:       "when no stripe parameters are specified",
+			parameters: map[string]string{},
+			wantErr:    false,
 		},
 	}
-
-	// pass disabled/invalid values for "thickProvision" option
-	if isThickProvisionRequest(req.GetParameters()) {
-		t.Error("request is not for thick-provisioning")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if err := validateStriping(tt.parameters); (err != nil) != tt.wantErr {
+				t.Errorf("validateStriping() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
+}
 
-	req.Parameters["thickProvision"] = ""
-	if isThickProvisionRequest(req.GetParameters()) {
-		t.Errorf("request is not for thick-provisioning: %s", req.Parameters["thickProvision"])
+func TestToCSIVolume(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		rv      *rbdVolume
+		wantErr bool
+	}{
+		{
+			name: "all attributes set",
+			rv: &rbdVolume{
+				rbdImage: rbdImage{
+					VolID:        "0001-unique-volume-id",
+					Pool:         "ecpool",
+					JournalPool:  "replicapool",
+					RbdImageName: "csi-vol-01234-5678-90abc",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "missing volume-id",
+			rv: &rbdVolume{
+				rbdImage: rbdImage{
+					VolID:        "",
+					Pool:         "ecpool",
+					JournalPool:  "replicapool",
+					RbdImageName: "csi-vol-01234-5678-90abc",
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing pool",
+			rv: &rbdVolume{
+				rbdImage: rbdImage{
+					VolID:        "0001-unique-volume-id",
+					Pool:         "",
+					JournalPool:  "replicapool",
+					RbdImageName: "csi-vol-01234-5678-90abc",
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing journal-pool",
+			rv: &rbdVolume{
+				rbdImage: rbdImage{
+					VolID:        "0001-unique-volume-id",
+					Pool:         "ecpool",
+					JournalPool:  "",
+					RbdImageName: "csi-vol-01234-5678-90abc",
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing image-name",
+			rv: &rbdVolume{
+				rbdImage: rbdImage{
+					VolID:        "0001-unique-volume-id",
+					Pool:         "ecpool",
+					JournalPool:  "",
+					RbdImageName: "",
+				},
+			},
+			wantErr: true,
+		},
 	}
-
-	req.Parameters["thickProvision"] = "false"
-	if isThickProvisionRequest(req.GetParameters()) {
-		t.Errorf("request is not for thick-provisioning: %s", req.Parameters["thickProvision"])
-	}
-
-	req.Parameters["thickProvision"] = "off"
-	if isThickProvisionRequest(req.GetParameters()) {
-		t.Errorf("request is not for thick-provisioning: %s", req.Parameters["thickProvision"])
-	}
-
-	req.Parameters["thickProvision"] = "no"
-	if isThickProvisionRequest(req.GetParameters()) {
-		t.Errorf("request is not for thick-provisioning: %s", req.Parameters["thickProvision"])
-	}
-
-	req.Parameters["thickProvision"] = "**true**"
-	if isThickProvisionRequest(req.GetParameters()) {
-		t.Errorf("request is not for thick-provisioning: %s", req.Parameters["thickProvision"])
-	}
-
-	// only "true" should enable thick provisioning
-	req.Parameters["thickProvision"] = "true"
-	if !isThickProvisionRequest(req.GetParameters()) {
-		t.Errorf("request should be for thick-provisioning: %s", req.Parameters["thickProvision"])
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := tt.rv.ToCSI(context.TODO()); (err != nil) != tt.wantErr {
+				t.Errorf("ToCSI() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
 }

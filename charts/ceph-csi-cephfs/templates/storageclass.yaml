@@ -2,19 +2,29 @@
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-   name: {{ .Values.storageClass.name }}
-   namespace: {{ .Release.Namespace }}
-   labels:
-     app: {{ include "ceph-csi-cephfs.name" . }}
-     chart: {{ include "ceph-csi-cephfs.chart" . }}
-     release: {{ .Release.Name }}
-     heritage: {{ .Release.Service }}
+  name: {{ .Values.storageClass.name }}
+{{- if .Values.storageClass.annotations }}
+  annotations:
+{{ toYaml .Values.storageClass.annotations | indent 4 }}
+{{- end }}
+  labels:
+    app: {{ include "ceph-csi-cephfs.name" . }}
+    chart: {{ include "ceph-csi-cephfs.chart" . }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+    {{- with .Values.commonLabels }}{{ toYaml . | trim | nindent 4 }}{{- end }}
 provisioner: {{ .Values.driverName }}
 parameters:
   clusterID: {{ .Values.storageClass.clusterID }}
   fsName: {{ .Values.storageClass.fsName }}
 {{- if .Values.storageClass.pool }}
   pool: {{ .Values.storageClass.pool }}
+{{- end }}
+{{- if .Values.storageClass.encrypted }}
+  encrypted: "{{ .Values.storageClass.encrypted }}"
+{{- end }}
+{{- if .Values.storageClass.encryptionKMSID }}
+  encryptionKMSID: {{ .Values.storageClass.encryptionKMSID }}
 {{- end }}
 {{- if .Values.storageClass.fuseMountOptions }}
   fuseMountOptions: "{{ .Values.storageClass.fuseMountOptions }}"

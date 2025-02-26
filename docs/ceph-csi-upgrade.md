@@ -1,32 +1,33 @@
 # Ceph-csi Upgrade
 
 - [Ceph-csi Upgrade](#ceph-csi-upgrade)
-  - [Pre-upgrade considerations](#pre-upgrade-considerations)
-    - [Snapshot-controller and snapshot crd](#snapshot-controller-and-snapshot-crd)
-      - [Snapshot API version support matrix](#snapshot-api-version-support-matrix)
-  - [Upgrading from v1.2 to v2.0](#upgrading-from-v12-to-v20)
-  - [Upgrading from v2.0 to v2.1](#upgrading-from-v20-to-v21)
-  - [Upgrading from v2.1 to v3.0](#upgrading-from-v21-to-v30)
-  - [Upgrading from v3.0 to v3.1](#upgrading-from-v30-to-v31)
-  - [Upgrading from v3.1 to v3.2](#upgrading-from-v31-to-v32)
-  - [Upgrading from v3.2 to v3.3](#upgrading-from-v32-to-v33)
-  - [Upgrading from v3.3 to v3.4](#upgrading-from-v33-to-v34)
-    - [Upgrading CephFS](#upgrading-cephfs)
-      - [1. Upgrade CephFS Provisioner resources](#1-upgrade-cephfs-provisioner-resources)
-        - [1.1 Update the CephFS Provisioner RBAC](#11-update-the-cephfs-provisioner-rbac)
-        - [1.2 Update the CephFS Provisioner deployment](#12-update-the-cephfs-provisioner-deployment)
-      - [2. Upgrade CephFS Nodeplugin resources](#2-upgrade-cephfs-nodeplugin-resources)
-        - [2.1 Update the CephFS Nodeplugin RBAC](#21-update-the-cephfs-nodeplugin-rbac)
-        - [2.2 Update the CephFS Nodeplugin daemonset](#22-update-the-cephfs-nodeplugin-daemonset)
-        - [2.3 Manual deletion of CephFS Nodeplugin daemonset pods](#23-manual-deletion-of-cephfs-nodeplugin-daemonset-pods)
-    - [Upgrading RBD](#upgrading-rbd)
-      - [3. Upgrade RBD Provisioner resources](#3-upgrade-rbd-provisioner-resources)
-        - [3.1 Update the RBD Provisioner RBAC](#31-update-the-rbd-provisioner-rbac)
-        - [3.2 Update the RBD Provisioner deployment](#32-update-the-rbd-provisioner-deployment)
-      - [4. Upgrade RBD Nodeplugin resources](#4-upgrade-rbd-nodeplugin-resources)
-        - [4.1 Update the RBD Nodeplugin RBAC](#41-update-the-rbd-nodeplugin-rbac)
-        - [4.2 Update the RBD Nodeplugin daemonset](#42-update-the-rbd-nodeplugin-daemonset)
-    - [CSI Sidecar containers consideration](#csi-sidecar-containers-consideration)
+   - [Pre-upgrade considerations](#pre-upgrade-considerations)
+      - [Snapshot-controller and snapshot crd](#snapshot-controller-and-snapshot-crd)
+   - [Upgrading from previous releases](#upgrading-from-previous-releases)
+   - [Upgrading from v3.12 to v3.13](#upgrading-from-v312-to-v313)
+      - [Upgrading CephFS](#upgrading-cephfs)
+         - [1. Upgrade CephFS Provisioner resources](#1-upgrade-cephfs-provisioner-resources)
+            - [1.1 Update the CephFS Provisioner RBAC](#11-update-the-cephfs-provisioner-rbac)
+            - [1.2 Update the CephFS Provisioner deployment](#12-update-the-cephfs-provisioner-deployment)
+         - [2. Upgrade CephFS Nodeplugin resources](#2-upgrade-cephfs-nodeplugin-resources)
+            - [2.1 Update the CephFS Nodeplugin RBAC](#21-update-the-cephfs-nodeplugin-rbac)
+            - [2.2 Update the CephFS Nodeplugin daemonset](#22-update-the-cephfs-nodeplugin-daemonset)
+            - [2.3 Manual deletion of CephFS Nodeplugin daemonset pods](#23-manual-deletion-of-cephfs-nodeplugin-daemonset-pods)
+      - [Upgrading RBD](#upgrading-rbd)
+         - [3. Upgrade RBD Provisioner resources](#3-upgrade-rbd-provisioner-resources)
+            - [3.1 Update the RBD Provisioner RBAC](#31-update-the-rbd-provisioner-rbac)
+            - [3.2 Update the RBD Provisioner deployment](#32-update-the-rbd-provisioner-deployment)
+         - [4. Upgrade RBD Nodeplugin resources](#4-upgrade-rbd-nodeplugin-resources)
+            - [4.1 Update the RBD Nodeplugin RBAC](#41-update-the-rbd-nodeplugin-rbac)
+            - [4.2 Update the RBD Nodeplugin daemonset](#42-update-the-rbd-nodeplugin-daemonset)
+      - [Upgrading NFS](#upgrading-nfs)
+         - [5. Upgrade NFS Provisioner resources](#5-upgrade-nfs-provisioner-resources)
+            - [5.1 Update the NFS Provisioner RBAC](#51-update-the-nfs-provisioner-rbac)
+            - [5.2 Update the NFS Provisioner deployment](#52-update-the-nfs-provisioner-deployment)
+         - [6. Upgrade NFS Nodeplugin resources](#6-upgrade-nfs-nodeplugin-resources)
+            - [6.1 Update the NFS Nodeplugin RBAC](#61-update-the-nfs-nodeplugin-rbac)
+            - [6.2 Update the NFS Nodeplugin daemonset](#62-update-the-nfs-nodeplugin-daemonset)
+      - [CSI Sidecar containers consideration](#csi-sidecar-containers-consideration)
 
 ## Pre-upgrade considerations
 
@@ -48,7 +49,7 @@ To avoid this issue in future upgrades, we recommend that you do not use the
 fuse client as of now.
 
 This guide will walk you through the steps to upgrade the software in a cluster
-from v3.3 to v3.4
+from v3.12 to v3.13
 
 ### Snapshot-controller and snapshot crd
 
@@ -56,49 +57,32 @@ Its kubernetes distributor responsibility to install new snapshot
 controller and snapshot CRD. more info can be found
 [here](https://github.com/kubernetes-csi/external-snapshotter/tree/master#usage)
 
-#### Snapshot API version support matrix
-
-| Snapshot API version | Kubernetes Version   | Snapshot-Controller + CRDs Version | Sidecar Version |
-| -------------------- | -------------------- | ---------------------------------- | --------------- |
-| v1beta1              | v1.17 =< k8s < v1.20 | v2.x =< snapshot-controller < v4.x | sidecar >= v2.x |
-| v1                   | k8s >= v1.20         | snapshot-controller >= v4.x        | sidecar >= v2.x |
-
 **Note:** We recommend to use {sidecar, controller, crds} of same version
 
-## Upgrading from v1.2 to v2.0
+## Upgrading from previous releases
 
-Refer
-[upgrade-from-v1.2-v2.0](https://github.com/ceph/ceph-csi/blob/v2.0.1/docs/ceph-csi-upgrade.md)
-to upgrade from cephcsi v1.2 to v2.0
+To upgrade from previous releases, refer to the following:
 
-## Upgrading from v2.0 to v2.1
+- [upgrade-from-v3.2-v3.3](https://github.com/ceph/ceph-csi/blob/v3.3.1/docs/ceph-csi-upgrade.md)
+  to upgrade from cephcsi v3.2 to v3.3
+- [upgrade-from-v3.3-v3.4](https://github.com/ceph/ceph-csi/blob/v3.4.0/docs/ceph-csi-upgrade.md)
+  to upgrade from cephcsi v3.3 to v3.4
+- [upgrade-from-v3.4-v3.5](https://github.com/ceph/ceph-csi/blob/v3.5.1/docs/ceph-csi-upgrade.md)
+  to upgrade from cephcsi v3.4 to v3.5
+- [upgrade-from-v3.5-v3.6](https://github.com/ceph/ceph-csi/blob/v3.6.1/docs/ceph-csi-upgrade.md)
+  to upgrade from cephcsi v3.5 to v3.6
+- [upgrade-from-v3.6-v3.7](https://github.com/ceph/ceph-csi/blob/v3.7.2/docs/ceph-csi-upgrade.md)
+  to upgrade from cephcsi v3.6 to v3.7
+- [upgrade-from-v3.7-v3.8](https://github.com/ceph/ceph-csi/blob/v3.8.0/docs/ceph-csi-upgrade.md)
+  to upgrade from cephcsi v3.7 to v3.8
+- [upgrade-from-v3.8-v3.9](https://github.com/ceph/ceph-csi/blob/v3.9.0/docs/ceph-csi-upgrade.md)
+  to upgrade from cephcsi v3.8 to v3.9
+- [upgrade-from-v3.9-v3.10](https://github.com/ceph/ceph-csi/blob/v3.10.0/docs/ceph-csi-upgrade.md)
+- [upgrade-from-v3.10-v3.11](https://github.com/ceph/ceph-csi/blob/v3.11.0/docs/ceph-csi-upgrade.md)
+- [upgrade-from-v3.11-v3.12](https://github.com/ceph/ceph-csi/blob/v3.12.3/docs/ceph-csi-upgrade.md)
+  to upgrade from cephcsi v3.11 to v3.12
 
-Refer
-[upgrade-from-v2.0-v2.1](https://github.com/ceph/ceph-csi/blob/v2.1.2/docs/ceph-csi-upgrade.md)
-to upgrade from cephcsi v2.0 to v2.1
-
-## Upgrading from v2.1 to v3.0
-
-Refer
-[upgrade-from-v2.1-v3.0](https://github.com/ceph/ceph-csi/blob/v3.0.0/docs/ceph-csi-upgrade.md)
-to upgrade from cephcsi v2.1 to v3.0
-
-## Upgrading from v3.0 to v3.1
-
-Refer [upgrade-from-v3.0-v3.1](https://github.com/ceph/ceph-csi/blob/v3.1.2/docs/ceph-csi-upgrade.md)
-to upgrade from cephcsi v3.0 to v3.1
-
-## Upgrading from v3.1 to v3.2
-
-Refer [upgrade-from-v3.1-v3.2](https://github.com/ceph/ceph-csi/blob/v3.2.1/docs/ceph-csi-upgrade.md)
-to upgrade from cephcsi v3.1 to v3.2
-
-## Upgrading from v3.2 to v3.3
-
-Refer [upgrade-from-v3.2-v3.3](https://github.com/ceph/ceph-csi/blob/v3.3.1/docs/ceph-csi-upgrade.md)
-to upgrade from cephcsi v3.2 to v3.3
-
-## Upgrading from v3.3 to v3.4
+## Upgrading from v3.12 to v3.13
 
 **Ceph-csi releases from devel are expressly unsupported.** It is strongly
 recommended that you use [official
@@ -108,22 +92,26 @@ that will not be supported in the official releases. Builds from the devel
 branch can have functionality changed and even removed at any time without
 compatibility support and without prior notice.
 
-**Also, we do not recommend any direct upgrades to 3.4 except from 3.3 to 3.4.**
-For example, upgrading from 3.2 to 3.4 is not recommended.
+**Also, we do not recommend any direct upgrades to 3.13 except from 3.12 to 3.13.**
+For example, upgrading from 3.10 to 3.13 is not recommended.
 
-git checkout v3.4.0 tag
+**Refer to the Breaking Changes Section in the
+[release notes](https://github.com/ceph/ceph-csi/releases/tag/v3.12.0) before
+proceeding further.**
+
+git checkout v3.13.0 tag
 
 ```bash
 git clone https://github.com/ceph/ceph-csi.git
 cd ./ceph-csi
-git checkout v3.4.0
+git checkout v3.13.0
 ```
-
-**Note:** While upgrading please Ignore warning messages from kubectl output
 
 ```console
 Warning: kubectl apply should be used on resource created by either kubectl create --save-config or kubectl apply
 ```
+
+**Note:** While upgrading please Ignore above warning messages from kubectl output
 
 ### Upgrading CephFS
 
@@ -176,9 +164,6 @@ nodeplugin daemonset
 ```bash
 $ kubectl apply -f deploy/cephfs/kubernetes/csi-nodeplugin-rbac.yaml
 serviceaccount/cephfs-csi-nodeplugin configured
-clusterrole.rbac.authorization.k8s.io/cephfs-csi-nodeplugin configured
-clusterrole.rbac.authorization.k8s.io/cephfs-csi-nodeplugin-rules configured
-clusterrolebinding.rbac.authorization.k8s.io/cephfs-csi-nodeplugin configured
 ```
 
 If you determined in [Pre-upgrade considerations](#pre-upgrade-considerations)
@@ -235,13 +220,13 @@ For each node:
 
 - Drain your application pods from the node
 - Delete the CSI driver pods on the node
-  - The pods to delete will be named with a csi-cephfsplugin prefix and have a
-    random suffix on each node. However, no need to delete the provisioner
-    pods: csi-cephfsplugin-provisioner-* .
-  - The pod deletion causes the pods to be restarted and updated automatically
-    on the node.
+   - The pods to delete will be named with a csi-cephfsplugin prefix and have a
+     random suffix on each node. However, no need to delete the provisioner
+     pods: csi-cephfsplugin-provisioner-* .
+   - The pod deletion causes the pods to be restarted and updated automatically
+     on the node.
 
-we have successfully upgraded cephfs csi from v3.3 to v3.4
+we have successfully upgraded cephfs csi from v3.12 to v3.13
 
 ### Upgrading RBD
 
@@ -260,7 +245,6 @@ Provisioner deployment
 $ kubectl apply -f deploy/rbd/kubernetes/csi-provisioner-rbac.yaml
 serviceaccount/rbd-csi-provisioner configured
 clusterrole.rbac.authorization.k8s.io/rbd-external-provisioner-runner configured
-clusterrole.rbac.authorization.k8s.io/rbd-external-provisioner-runner-rules configured
 clusterrolebinding.rbac.authorization.k8s.io/rbd-csi-provisioner-role configured
 role.rbac.authorization.k8s.io/rbd-external-provisioner-cfg configured
 rolebinding.rbac.authorization.k8s.io/rbd-csi-provisioner-role-cfg configured
@@ -295,7 +279,6 @@ nodeplugin daemonset
 $ kubectl apply -f deploy/rbd/kubernetes/csi-nodeplugin-rbac.yaml
 serviceaccount/rbd-csi-nodeplugin configured
 clusterrole.rbac.authorization.k8s.io/rbd-csi-nodeplugin configured
-clusterrole.rbac.authorization.k8s.io/rbd-csi-nodeplugin-rules configured
 clusterrolebinding.rbac.authorization.k8s.io/rbd-csi-nodeplugin configured
 ```
 
@@ -307,7 +290,69 @@ daemonset.apps/csi-rbdplugin configured
 service/csi-metrics-rbdplugin configured
 ```
 
-we have successfully upgraded RBD csi from v3.3 to v3.4
+we have successfully upgraded RBD csi from v3.12 to v3.13
+
+### Upgrading NFS
+
+Upgrading nfs csi includes upgrade of nfs driver and as well as
+kubernetes sidecar containers and also the permissions required for the
+kubernetes sidecar containers, lets upgrade the things one by one
+
+#### 5. Upgrade NFS Provisioner resources
+
+Upgrade provisioner resources include updating the provisioner RBAC and
+Provisioner deployment
+
+##### 5.1 Update the NFS Provisioner RBAC
+
+```bash
+$ kubectl apply -f deploy/nfs/kubernetes/csi-provisioner-rbac.yaml
+serviceaccount/nfs-csi-provisioner configured
+clusterrole.rbac.authorization.k8s.io/nfs-external-provisioner-runner configured
+clusterrolebinding.rbac.authorization.k8s.io/nfs-csi-provisioner-role configured
+role.rbac.authorization.k8s.io/nfs-external-provisioner-cfg configured
+rolebinding.rbac.authorization.k8s.io/nfs-csi-provisioner-role-cfg configured
+```
+
+##### 5.2 Update the NFS Provisioner deployment
+
+```bash
+$ kubectl apply -f deploy/nfs/kubernetes/csi-nfsplugin-provisioner.yaml
+service/csi-nfsplugin-provisioner configured
+deployment.apps/csi-nfsplugin-provisioner configured
+```
+
+wait for the deployment to complete
+
+```bash
+$ kubectl get deployment
+NAME                           READY   UP-TO-DATE   AVAILABLE   AGE
+csi-nfsplugin-provisioner      5/5     1            5           104m
+```
+
+deployment UP-TO-DATE value must be same as READY
+
+#### 6. Upgrade NFS Nodeplugin resources
+
+Upgrading nodeplugin resources include updating the nodeplugin RBAC and
+nodeplugin daemonset
+
+##### 6.1 Update the NFS Nodeplugin RBAC
+
+```bash
+$ kubectl apply -f deploy/nfs/kubernetes/csi-nodeplugin-rbac.yaml
+serviceaccount/nfs-csi-nodeplugin configured
+```
+
+##### 6.2 Update the NFS Nodeplugin daemonset
+
+```bash
+$ kubectl apply -f deploy/nfs/kubernetes/csi-nfsplugin.yaml
+daemonset.apps/csi-nfsplugin configured
+service/csi-metrics-nfsplugin configured
+```
+
+we have successfully upgraded nfs csi from v3.12 to v3.13
 
 ### CSI Sidecar containers consideration
 

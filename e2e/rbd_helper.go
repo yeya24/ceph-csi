@@ -1,9 +1,24 @@
+/*
+Copyright 2021 The Ceph-CSI Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2e
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -12,23 +27,16 @@ import (
 
 	"github.com/ceph/ceph-csi/internal/util"
 
-	snapapi "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
+	snapapi "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	v1 "k8s.io/api/core/v1"
 	scv1 "k8s.io/api/storage/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
-	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
 )
 
-const (
-	// image metadata key for thick-provisioning.
-	thickProvisionMetaKey = "rbd.csi.ceph.com/thick-provisioned"
-)
-
-// nolint:gomnd // numbers specify Kernel versions.
+//nolint:mnd // numbers specify Kernel versions.
 var nbdResizeSupport = []util.KernelVersion{
 	{
 		Version:      5,
@@ -40,9 +48,34 @@ var nbdResizeSupport = []util.KernelVersion{
 	}, // standard 5.3+ versions
 }
 
+//nolint:mnd // numbers specify Kernel versions.
+var fastDiffSupport = []util.KernelVersion{
+	{
+		Version:      5,
+		PatchLevel:   3,
+		SubLevel:     0,
+		ExtraVersion: 0,
+		Distribution: "",
+		Backport:     false,
+	}, // standard 5.3+ versions
+}
+
+//nolint:mnd // numbers specify Kernel versions.
+var deepFlattenSupport = []util.KernelVersion{
+	{
+		Version:      5,
+		PatchLevel:   1,
+		SubLevel:     0,
+		ExtraVersion: 0,
+		Distribution: "",
+		Backport:     false,
+	}, // standard 5.1+ versions
+}
+
 // To use `io-timeout=0` we need
 // www.mail-archive.com/linux-block@vger.kernel.org/msg38060.html
-// nolint:gomnd // numbers specify Kernel versions.
+//
+//nolint:mnd // numbers specify Kernel versions.
 var nbdZeroIOtimeoutSupport = []util.KernelVersion{
 	{
 		Version:      5,
@@ -83,8 +116,9 @@ func createRBDStorageClass(
 	f *framework.Framework,
 	name string,
 	scOptions, parameters map[string]string,
-	policy v1.PersistentVolumeReclaimPolicy) error {
-	scPath := fmt.Sprintf("%s/%s", rbdExamplePath, "storageclass.yaml")
+	policy v1.PersistentVolumeReclaimPolicy,
+) error {
+	scPath := rbdExamplePath + "/" + "storageclass.yaml"
 	sc, err := getStorageClass(scPath)
 	if err != nil {
 		return fmt.Errorf("failed to get sc: %w", err)
@@ -92,7 +126,10 @@ func createRBDStorageClass(
 	if name != "" {
 		sc.Name = name
 	}
-	sc.Parameters["pool"] = defaultRBDPool
+	// add pool only if topologyConstrainedPools is not present
+	if _, ok := parameters["topologyConstrainedPools"]; !ok {
+		sc.Parameters["pool"] = defaultRBDPool
+	}
 	sc.Parameters["csi.storage.k8s.io/provisioner-secret-namespace"] = cephCSINamespace
 	sc.Parameters["csi.storage.k8s.io/provisioner-secret-name"] = rbdProvisionerSecretName
 
@@ -102,21 +139,19 @@ func createRBDStorageClass(
 	sc.Parameters["csi.storage.k8s.io/node-stage-secret-namespace"] = cephCSINamespace
 	sc.Parameters["csi.storage.k8s.io/node-stage-secret-name"] = rbdNodePluginSecretName
 
-	fsID, stdErr, err := execCommandInToolBoxPod(f, "ceph fsid", rookNamespace)
+	fsID, err := getClusterID(f)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get clusterID: %w", err)
 	}
-	if stdErr != "" {
-		return fmt.Errorf("error getting fsid %v", stdErr)
-	}
-	// remove new line present in fsID
-	fsID = strings.Trim(fsID, "\n")
 
 	sc.Parameters["clusterID"] = fsID
 	for k, v := range parameters {
 		sc.Parameters[k] = v
+		// if any values are empty remove it from the map
+		if v == "" {
+			delete(sc.Parameters, k)
+		}
 	}
-	sc.Namespace = cephCSINamespace
 
 	if scOptions["volumeBindingMode"] == "WaitForFirstConsumer" {
 		value := scv1.VolumeBindingWaitForFirstConsumer
@@ -129,14 +164,27 @@ func createRBDStorageClass(
 		sc.MountOptions = append(sc.MountOptions, mOpt...)
 	}
 	sc.ReclaimPolicy = &policy
-	_, err = c.StorageV1().StorageClasses().Create(context.TODO(), &sc, metav1.CreateOptions{})
 
-	return err
+	timeout := time.Duration(deployTimeout) * time.Minute
+
+	return wait.PollUntilContextTimeout(context.TODO(), poll, timeout, true, func(ctx context.Context) (bool, error) {
+		_, err = c.StorageV1().StorageClasses().Create(ctx, &sc, metav1.CreateOptions{})
+		if err != nil {
+			framework.Logf("error creating StorageClass %q: %v", sc.Name, err)
+			if isRetryableAPIError(err) {
+				return false, nil
+			}
+
+			return false, fmt.Errorf("failed to create StorageClass %q: %w", sc.Name, err)
+		}
+
+		return true, nil
+	})
 }
 
 func createRadosNamespace(f *framework.Framework) error {
 	stdOut, stdErr, err := execCommandInToolBoxPod(f,
-		fmt.Sprintf("rbd namespace ls --pool=%s", defaultRBDPool), rookNamespace)
+		"rbd namespace ls --pool="+defaultRBDPool, rookNamespace)
 	if err != nil {
 		return err
 	}
@@ -145,7 +193,7 @@ func createRadosNamespace(f *framework.Framework) error {
 	}
 	if !strings.Contains(stdOut, radosNamespace) {
 		_, stdErr, err = execCommandInToolBoxPod(f,
-			fmt.Sprintf("rbd namespace create %s", rbdOptions(defaultRBDPool)), rookNamespace)
+			"rbd namespace create "+rbdOptions(defaultRBDPool), rookNamespace)
 		if err != nil {
 			return err
 		}
@@ -154,7 +202,7 @@ func createRadosNamespace(f *framework.Framework) error {
 		}
 	}
 	stdOut, stdErr, err = execCommandInToolBoxPod(f,
-		fmt.Sprintf("rbd namespace ls --pool=%s", rbdTopologyPool), rookNamespace)
+		"rbd namespace ls --pool="+rbdTopologyPool, rookNamespace)
 	if err != nil {
 		return err
 	}
@@ -164,7 +212,7 @@ func createRadosNamespace(f *framework.Framework) error {
 
 	if !strings.Contains(stdOut, radosNamespace) {
 		_, stdErr, err = execCommandInToolBoxPod(f,
-			fmt.Sprintf("rbd namespace create %s", rbdOptions(rbdTopologyPool)), rookNamespace)
+			"rbd namespace create "+rbdOptions(rbdTopologyPool), rookNamespace)
 		if err != nil {
 			return err
 		}
@@ -221,7 +269,7 @@ func getImageInfoFromPVC(pvcNamespace, pvcName string, f *framework.Framework) (
 
 	imageData = imageInfoFromPVC{
 		imageID:         imageID,
-		imageName:       fmt.Sprintf("csi-vol-%s", imageID),
+		imageName:       "csi-vol-" + imageID,
 		csiVolumeHandle: pv.Spec.CSI.VolumeHandle,
 		pvName:          pv.Name,
 	}
@@ -236,7 +284,7 @@ func getImageMeta(rbdImageSpec, metaKey string, f *framework.Framework) (string,
 		return "", err
 	}
 	if stdErr != "" {
-		return strings.TrimSpace(stdOut), fmt.Errorf(stdErr)
+		return strings.TrimSpace(stdOut), fmt.Errorf("%s", stdErr)
 	}
 
 	return strings.TrimSpace(stdOut), nil
@@ -280,13 +328,13 @@ func validateImageOwner(pvcPath string, f *framework.Framework) error {
 	}
 
 	if radosNamespace != "" {
-		e2elog.Logf(
+		framework.Logf(
 			"found image journal %s in pool %s namespace %s",
 			"csi.volume."+imageData.imageID,
 			defaultRBDPool,
 			radosNamespace)
 	} else {
-		e2elog.Logf("found image journal %s in pool %s", "csi.volume."+imageData.imageID, defaultRBDPool)
+		framework.Logf("found image journal %s in pool %s", "csi.volume."+imageData.imageID, defaultRBDPool)
 	}
 
 	if !strings.Contains(stdOut, pvc.Namespace) {
@@ -301,7 +349,7 @@ func logErrors(f *framework.Framework, msg string, wgErrs []error) int {
 	for i, err := range wgErrs {
 		if err != nil {
 			// not using Failf() as it aborts the test and does not log other errors
-			e2elog.Logf("%s (%s%d): %v", msg, f.UniqueName, i, err)
+			framework.Logf("%s (%s%d): %v", msg, f.UniqueName, i, err)
 			failures++
 		}
 	}
@@ -315,13 +363,13 @@ func validateCloneInDifferentPool(f *framework.Framework, snapshotPool, cloneSc,
 	wgErrs := make([]error, totalCount)
 	pvc, err := loadPVC(pvcPath)
 	if err != nil {
-		return fmt.Errorf("failed to load PVC with error %w", err)
+		return fmt.Errorf("failed to load PVC: %w", err)
 	}
 
 	pvc.Namespace = f.UniqueName
 	err = createPVCAndvalidatePV(f.ClientSet, pvc, deployTimeout)
 	if err != nil {
-		return fmt.Errorf("failed to create PVC with error %w", err)
+		return fmt.Errorf("failed to create PVC: %w", err)
 	}
 	validateRBDImageCount(f, 1, defaultRBDPool)
 	snap := getSnapshot(snapshotPath)
@@ -329,7 +377,7 @@ func validateCloneInDifferentPool(f *framework.Framework, snapshotPool, cloneSc,
 	snap.Spec.Source.PersistentVolumeClaimName = &pvc.Name
 	// create snapshot
 	wg.Add(totalCount)
-	for i := 0; i < totalCount; i++ {
+	for i := range totalCount {
 		go func(n int, s snapapi.VolumeSnapshot) {
 			s.Name = fmt.Sprintf("%s%d", f.UniqueName, n)
 			wgErrs[n] = createSnapshot(&s, deployTimeout)
@@ -345,7 +393,7 @@ func validateCloneInDifferentPool(f *framework.Framework, snapshotPool, cloneSc,
 	// delete parent pvc
 	err = deletePVCAndValidatePV(f.ClientSet, pvc, deployTimeout)
 	if err != nil {
-		return fmt.Errorf("failed to delete PVC with error %w", err)
+		return fmt.Errorf("failed to delete PVC: %w", err)
 	}
 
 	// validate the rbd images created for snapshots
@@ -353,11 +401,11 @@ func validateCloneInDifferentPool(f *framework.Framework, snapshotPool, cloneSc,
 
 	pvcClone, err := loadPVC(pvcClonePath)
 	if err != nil {
-		return fmt.Errorf("failed to load PVC with error %w", err)
+		return fmt.Errorf("failed to load PVC: %w", err)
 	}
 	appClone, err := loadApp(appClonePath)
 	if err != nil {
-		return fmt.Errorf("failed to load application with error %w", err)
+		return fmt.Errorf("failed to load application: %w", err)
 	}
 	pvcClone.Namespace = f.UniqueName
 	// if request is to create clone with different storage class
@@ -368,7 +416,7 @@ func validateCloneInDifferentPool(f *framework.Framework, snapshotPool, cloneSc,
 	pvcClone.Spec.DataSource.Name = fmt.Sprintf("%s%d", f.UniqueName, 0)
 	// create multiple PVCs from same snapshot
 	wg.Add(totalCount)
-	for i := 0; i < totalCount; i++ {
+	for i := range totalCount {
 		go func(n int, p v1.PersistentVolumeClaim, a v1.Pod) {
 			name := fmt.Sprintf("%s%d", f.UniqueName, n)
 			wgErrs[n] = createPVCAndApp(name, f, &p, &a, deployTimeout)
@@ -392,7 +440,7 @@ func validateCloneInDifferentPool(f *framework.Framework, snapshotPool, cloneSc,
 	}
 	wg.Add(totalCount)
 	// delete clone and app
-	for i := 0; i < totalCount; i++ {
+	for i := range totalCount {
 		go func(n int, p v1.PersistentVolumeClaim, a v1.Pod) {
 			name := fmt.Sprintf("%s%d", f.UniqueName, n)
 			p.Spec.DataSource.Name = name
@@ -416,7 +464,7 @@ func validateCloneInDifferentPool(f *framework.Framework, snapshotPool, cloneSc,
 
 	wg.Add(totalCount)
 	// delete snapshot
-	for i := 0; i < totalCount; i++ {
+	for i := range totalCount {
 		go func(n int, s snapapi.VolumeSnapshot) {
 			s.Name = fmt.Sprintf("%s%d", f.UniqueName, n)
 			wgErrs[n] = deleteSnapshot(&s, deployTimeout)
@@ -436,6 +484,8 @@ func validateCloneInDifferentPool(f *framework.Framework, snapshotPool, cloneSc,
 	return nil
 }
 
+type encryptionValidateFunc func(pvcPath, appPath string, kms kmsConfig, f *framework.Framework) error
+
 func validateEncryptedPVCAndAppBinding(pvcPath, appPath string, kms kmsConfig, f *framework.Framework) error {
 	pvc, app, err := createPVCAndAppBinding(pvcPath, appPath, f, deployTimeout)
 	if err != nil {
@@ -447,7 +497,7 @@ func validateEncryptedPVCAndAppBinding(pvcPath, appPath string, kms kmsConfig, f
 	}
 
 	rbdImageSpec := imageSpec(defaultRBDPool, imageData.imageName)
-	err = validateEncryptedImage(f, rbdImageSpec, app)
+	err = validateEncryptedImage(f, rbdImageSpec, imageData.pvName, app.Name)
 	if err != nil {
 		return err
 	}
@@ -478,7 +528,56 @@ func validateEncryptedPVCAndAppBinding(pvcPath, appPath string, kms kmsConfig, f
 		if !destroyed {
 			return fmt.Errorf("passphrased was not destroyed: %s", msg)
 		} else if msg != "" {
-			e2elog.Logf("passphrase destroyed, but message returned: %s", msg)
+			framework.Logf("passphrase destroyed, but message returned: %s", msg)
+		}
+	}
+
+	return nil
+}
+
+func validateEncryptedFilesystemAndAppBinding(pvcPath, appPath string, kms kmsConfig, f *framework.Framework) error {
+	pvc, app, err := createPVCAndAppBinding(pvcPath, appPath, f, deployTimeout)
+	if err != nil {
+		return err
+	}
+	imageData, err := getImageInfoFromPVC(pvc.Namespace, pvc.Name, f)
+	if err != nil {
+		return err
+	}
+
+	rbdImageSpec := imageSpec(defaultRBDPool, imageData.imageName)
+	err = validateEncryptedFilesystem(f, rbdImageSpec, imageData.pvName, app.Name)
+	if err != nil {
+		return err
+	}
+
+	if kms != noKMS && kms.canGetPassphrase() {
+		// check new passphrase created
+		_, stdErr := kms.getPassphrase(f, imageData.csiVolumeHandle)
+		if stdErr != "" {
+			return fmt.Errorf("failed to read passphrase from vault: %s", stdErr)
+		}
+	}
+
+	err = deletePVCAndApp("", f, pvc, app)
+	if err != nil {
+		return err
+	}
+
+	if kms != noKMS && kms.canGetPassphrase() {
+		// check new passphrase created
+		stdOut, _ := kms.getPassphrase(f, imageData.csiVolumeHandle)
+		if stdOut != "" {
+			return fmt.Errorf("passphrase found in vault while should be deleted: %s", stdOut)
+		}
+	}
+
+	if kms != noKMS && kms.canVerifyKeyDestroyed() {
+		destroyed, msg := kms.verifyKeyDestroyed(f, imageData.csiVolumeHandle)
+		if !destroyed {
+			return fmt.Errorf("passphrased was not destroyed: %s", msg)
+		} else if msg != "" {
+			framework.Logf("passphrase destroyed, but message returned: %s", msg)
 		}
 	}
 
@@ -491,54 +590,36 @@ type validateFunc func(f *framework.Framework, pvc *v1.PersistentVolumeClaim, ap
 // validation of the PVC is needed.
 var noPVCValidation validateFunc
 
-func isEncryptedPVC(f *framework.Framework, pvc *v1.PersistentVolumeClaim, app *v1.Pod) error {
+type imageValidateFunc func(f *framework.Framework, rbdImageSpec, pvName, appName string) error
+
+func isEncryptedPVC(
+	f *framework.Framework,
+	pvc *v1.PersistentVolumeClaim,
+	app *v1.Pod,
+	validateFunc imageValidateFunc,
+) error {
 	imageData, err := getImageInfoFromPVC(pvc.Namespace, pvc.Name, f)
 	if err != nil {
 		return err
 	}
 	rbdImageSpec := imageSpec(defaultRBDPool, imageData.imageName)
 
-	return validateEncryptedImage(f, rbdImageSpec, app)
+	return validateFunc(f, rbdImageSpec, imageData.pvName, app.Name)
 }
 
-func isThickPVC(f *framework.Framework, pvc *v1.PersistentVolumeClaim, app *v1.Pod) error {
-	du, err := getRbdDu(f, pvc)
-	if err != nil {
-		return fmt.Errorf("failed to get allocations of RBD image: %w", err)
-	} else if du.UsedSize == 0 || du.UsedSize != du.ProvisionedSize {
-		return fmt.Errorf("backing RBD image is not thick-provisioned (%d/%d)", du.UsedSize, du.ProvisionedSize)
-	}
-	err = validateThickImageMetadata(f, pvc, thickProvisionMetaKey)
-	if err != nil {
-		return fmt.Errorf("failed to validate thick image: %w", err)
-	}
-
-	return nil
+func isBlockEncryptedPVC(f *framework.Framework, pvc *v1.PersistentVolumeClaim, app *v1.Pod) error {
+	return isEncryptedPVC(f, pvc, app, validateEncryptedImage)
 }
 
-// validateThickImage check thick metadata is set on the the image.
-func validateThickImageMetadata(f *framework.Framework, pvc *v1.PersistentVolumeClaim, key string) error {
-	imageData, err := getImageInfoFromPVC(pvc.Namespace, pvc.Name, f)
-	if err != nil {
-		return err
-	}
-	rbdImageSpec := imageSpec(defaultRBDPool, imageData.imageName)
-	thickState, err := getImageMeta(rbdImageSpec, key, f)
-	if err != nil {
-		return err
-	}
-	if thickState == "" {
-		return fmt.Errorf("image metadata is set for %s", rbdImageSpec)
-	}
-
-	return nil
+func isFileEncryptedPVC(f *framework.Framework, pvc *v1.PersistentVolumeClaim, app *v1.Pod) error {
+	return isEncryptedPVC(f, pvc, app, validateEncryptedFilesystem)
 }
 
 // validateEncryptedImage verifies that the RBD image is encrypted. The
 // following checks are performed:
 // - Metadata of the image should be set with the encryption state;
 // - The pvc should be mounted by a pod, so the filesystem type can be fetched.
-func validateEncryptedImage(f *framework.Framework, rbdImageSpec string, app *v1.Pod) error {
+func validateEncryptedImage(f *framework.Framework, rbdImageSpec, pvName, appName string) error {
 	encryptedState, err := getImageMeta(rbdImageSpec, "rbd.csi.ceph.com/encrypted", f)
 	if err != nil {
 		return err
@@ -547,8 +628,19 @@ func validateEncryptedImage(f *framework.Framework, rbdImageSpec string, app *v1
 		return fmt.Errorf("%v not equal to encrypted", encryptedState)
 	}
 
-	volumeMountPath := app.Spec.Containers[0].VolumeMounts[0].MountPath
-	mountType, err := getMountType(app.Name, app.Namespace, volumeMountPath, f)
+	pod, err := f.ClientSet.CoreV1().Pods(f.UniqueName).Get(context.TODO(), appName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get pod %q in namespace %q: %w", appName, f.UniqueName, err)
+	}
+	volumeMountPath := fmt.Sprintf(
+		"/var/lib/kubelet/pods/%s/volumes/kubernetes.io~csi/%s/mount",
+		pod.UID,
+		pvName)
+	selector, err := getDaemonSetLabelSelector(f, cephCSINamespace, rbdDaemonsetName)
+	if err != nil {
+		return fmt.Errorf("failed to get labels: %w", err)
+	}
+	mountType, err := getMountType(selector, volumeMountPath, f)
 	if err != nil {
 		return err
 	}
@@ -559,11 +651,75 @@ func validateEncryptedImage(f *framework.Framework, rbdImageSpec string, app *v1
 	return nil
 }
 
+func validateEncryptedFilesystem(f *framework.Framework, rbdImageSpec, pvName, appName string) error {
+	pod, err := f.ClientSet.CoreV1().Pods(f.UniqueName).Get(context.TODO(), appName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get pod %q in namespace %q: %w", appName, f.UniqueName, err)
+	}
+	volumeMountPath := fmt.Sprintf(
+		"/var/lib/kubelet/pods/%s/volumes/kubernetes.io~csi/%s/mount",
+		pod.UID,
+		pvName)
+
+	selector, err := getDaemonSetLabelSelector(f, cephCSINamespace, rbdDaemonsetName)
+	if err != nil {
+		return fmt.Errorf("failed to get labels: %w", err)
+	}
+	opt := metav1.ListOptions{
+		LabelSelector: selector,
+	}
+	cmd := fmt.Sprintf("lsattr -la %s | grep -E '%s/.\\s+Encrypted'", volumeMountPath, volumeMountPath)
+	_, _, err = execCommandInContainer(f, cmd, cephCSINamespace, "csi-rbdplugin", &opt)
+	if err != nil {
+		cmd = "lsattr -lRa " + volumeMountPath
+		stdOut, stdErr, listErr := execCommandInContainer(f, cmd, cephCSINamespace, "csi-rbdplugin", &opt)
+		if listErr == nil {
+			return fmt.Errorf("error checking file encrypted attribute of %q. listing filesystem+attrs: %s %s",
+				volumeMountPath, stdOut, stdErr)
+		}
+
+		return fmt.Errorf("error checking file encrypted attribute: %w", err)
+	}
+
+	mountType, err := getMountType(selector, volumeMountPath, f)
+	if err != nil {
+		return err
+	}
+	if mountType == "crypt" {
+		return fmt.Errorf("mount type of %q is %v suggesting that the block device was encrypted,"+
+			" when it must not have been", volumeMountPath, mountType)
+	}
+
+	return nil
+}
+
+// librbdSupportsVolumeGroupSnapshot checks for the rbd_group_snap_get_info in
+// librbd.so.* in a ceph-csi container. If this function is available,
+// VolumeGroupSnapshot support is available.
+func librbdSupportsVolumeGroupSnapshot(f *framework.Framework) (bool, error) {
+	selector, err := getDaemonSetLabelSelector(f, cephCSINamespace, rbdDaemonsetName)
+	if err != nil {
+		return false, fmt.Errorf("failed to get labels: %w", err)
+	}
+	opt := metav1.ListOptions{
+		LabelSelector: selector,
+	}
+
+	// run a shell command (to expand the * in the filename), return 0 on stdout when successful
+	cmd := "sh -c 'grep -q rbd_group_snap_get_info /lib64/librbd.so.*; echo $?'"
+	stdout, _, err := execCommandInContainer(f, cmd, cephCSINamespace, "csi-rbdplugin", &opt)
+	if err != nil {
+		return false, fmt.Errorf("error checking for rbd_group_snap_get_info in /lib64/librbd.so.*: %w", err)
+	}
+
+	return strings.TrimSpace(stdout) == "0", nil
+}
+
 func listRBDImages(f *framework.Framework, pool string) ([]string, error) {
 	var imgInfos []string
 
 	stdout, stdErr, err := execCommandInToolBoxPod(f,
-		fmt.Sprintf("rbd ls --format=json %s", rbdOptions(pool)), rookNamespace)
+		"rbd ls --format=json "+rbdOptions(pool), rookNamespace)
 	if err != nil {
 		return imgInfos, err
 	}
@@ -592,6 +748,8 @@ func deleteBackingRBDImage(f *framework.Framework, pvc *v1.PersistentVolumeClaim
 }
 
 // rbdDuImage contains the disk-usage statistics of an RBD image.
+//
+//nolint:unused // required for reclaimspace e2e.
 type rbdDuImage struct {
 	Name            string `json:"name"`
 	ProvisionedSize uint64 `json:"provisioned_size"`
@@ -599,12 +757,16 @@ type rbdDuImage struct {
 }
 
 // rbdDuImageList contains the list of images returned by 'rbd du'.
+//
+//nolint:unused // required for reclaimspace e2e.
 type rbdDuImageList struct {
 	Images []*rbdDuImage `json:"images"`
 }
 
 // getRbdDu runs 'rbd du' on the RBD image and returns a rbdDuImage struct with
 // the result.
+//
+//nolint:unused // Unused code will be used in future.
 func getRbdDu(f *framework.Framework, pvc *v1.PersistentVolumeClaim) (*rbdDuImage, error) {
 	rdil := rbdDuImageList{}
 
@@ -637,6 +799,8 @@ func getRbdDu(f *framework.Framework, pvc *v1.PersistentVolumeClaim) (*rbdDuImag
 // data blocks that contain zeros are discarded/trimmed/unmapped and do not
 // take up any space anymore. This can be used to verify that an empty, but
 // allocated (with zerofill) extents have been released.
+//
+//nolint:unused // Unused code will be used in future.
 func sparsifyBackingRBDImage(f *framework.Framework, pvc *v1.PersistentVolumeClaim) error {
 	imageData, err := getImageInfoFromPVC(pvc.Namespace, pvc.Name, f)
 	if err != nil {
@@ -649,20 +813,24 @@ func sparsifyBackingRBDImage(f *framework.Framework, pvc *v1.PersistentVolumeCla
 	return err
 }
 
-func deletePool(name string, cephfs bool, f *framework.Framework) error {
+func deletePool(name string, cephFS bool, f *framework.Framework) error {
 	cmds := []string{}
-	if cephfs {
+	if cephFS {
+		//nolint:dupword // "ceph osd pool delete" requires the pool 2x
+		//
 		// ceph fs fail
 		// ceph fs rm myfs --yes-i-really-mean-it
 		// ceph osd pool delete myfs-metadata myfs-metadata
 		// --yes-i-really-mean-it
-		// ceph osd pool delete myfs-data0 myfs-data0
+		// ceph osd pool delete myfs-replicated myfs-replicated
 		// --yes-i-really-mean-it
-		cmds = append(cmds, fmt.Sprintf("ceph fs fail %s", name),
+		cmds = append(cmds, "ceph fs fail "+name,
 			fmt.Sprintf("ceph fs rm %s --yes-i-really-mean-it", name),
 			fmt.Sprintf("ceph osd pool delete %s-metadata %s-metadata --yes-i-really-really-mean-it", name, name),
-			fmt.Sprintf("ceph osd pool delete %s-data0 %s-data0 --yes-i-really-really-mean-it", name, name))
+			fmt.Sprintf("ceph osd pool delete %s-replicated %s-replicated --yes-i-really-really-mean-it", name, name))
 	} else {
+		//nolint:dupword // "ceph osd pool delete" requires the pool 2x
+		//
 		// ceph osd pool delete replicapool replicapool
 		// --yes-i-really-mean-it
 		cmds = append(cmds, fmt.Sprintf("ceph osd pool delete %s %s --yes-i-really-really-mean-it", name, name))
@@ -684,13 +852,13 @@ func createPool(f *framework.Framework, name string) error {
 		pgCount = 128
 		size    = 1
 	)
-	// ceph osd pool create replicapool
-	cmd := fmt.Sprintf("ceph osd pool create %s %d", name, pgCount)
+	// ceph osd pool create name
+	cmd := fmt.Sprintf("ceph osd pool create %s %d --yes-i-really-mean-it", name, pgCount)
 	_, _, err := execCommandInToolBoxPod(f, cmd, rookNamespace)
 	if err != nil {
 		return err
 	}
-	// ceph osd pool set replicapool size 1
+	// ceph osd pool set name size 1
 	cmd = fmt.Sprintf("ceph osd pool set %s size %d --yes-i-really-mean-it", name, size)
 	_, _, err = execCommandInToolBoxPod(f, cmd, rookNamespace)
 
@@ -704,7 +872,7 @@ func getPVCImageInfoInPool(f *framework.Framework, pvc *v1.PersistentVolumeClaim
 	}
 
 	stdOut, stdErr, err := execCommandInToolBoxPod(f,
-		fmt.Sprintf("rbd info %s", imageSpec(pool, imageData.imageName)), rookNamespace)
+		"rbd info "+imageSpec(pool, imageData.imageName), rookNamespace)
 	if err != nil {
 		return "", err
 	}
@@ -713,9 +881,9 @@ func getPVCImageInfoInPool(f *framework.Framework, pvc *v1.PersistentVolumeClaim
 	}
 
 	if radosNamespace != "" {
-		e2elog.Logf("found image %s in pool %s namespace %s", imageData.imageName, pool, radosNamespace)
+		framework.Logf("found image %s in pool %s namespace %s", imageData.imageName, pool, radosNamespace)
 	} else {
-		e2elog.Logf("found image %s in pool %s", imageData.imageName, pool)
+		framework.Logf("found image %s in pool %s", imageData.imageName, pool)
 	}
 
 	return stdOut, nil
@@ -730,7 +898,8 @@ func checkPVCImageInPool(f *framework.Framework, pvc *v1.PersistentVolumeClaim, 
 func checkPVCDataPoolForImageInPool(
 	f *framework.Framework,
 	pvc *v1.PersistentVolumeClaim,
-	pool, dataPool string) error {
+	pool, dataPool string,
+) error {
 	stdOut, err := getPVCImageInfoInPool(f, pvc, pool)
 	if err != nil {
 		return err
@@ -759,13 +928,13 @@ func checkPVCImageJournalInPool(f *framework.Framework, pvc *v1.PersistentVolume
 	}
 
 	if radosNamespace != "" {
-		e2elog.Logf(
+		framework.Logf(
 			"found image journal %s in pool %s namespace %s",
 			"csi.volume."+imageData.imageID,
 			pool,
 			radosNamespace)
 	} else {
-		e2elog.Logf("found image journal %s in pool %s", "csi.volume."+imageData.imageID, pool)
+		framework.Logf("found image journal %s in pool %s", "csi.volume."+imageData.imageID, pool)
 	}
 
 	return nil
@@ -794,13 +963,13 @@ func checkPVCCSIJournalInPool(f *framework.Framework, pvc *v1.PersistentVolumeCl
 	}
 
 	if radosNamespace != "" {
-		e2elog.Logf(
+		framework.Logf(
 			"found CSI journal entry %s in pool %s namespace %s",
 			"csi.volume."+imageData.pvName,
 			pool,
 			radosNamespace)
 	} else {
-		e2elog.Logf("found CSI journal entry %s in pool %s", "csi.volume."+imageData.pvName, pool)
+		framework.Logf("found CSI journal entry %s in pool %s", "csi.volume."+imageData.pvName, pool)
 	}
 
 	return nil
@@ -828,7 +997,7 @@ func deletePVCImageJournalInPool(f *framework.Framework, pvc *v1.PersistentVolum
 	}
 	if stdErr != "" {
 		return fmt.Errorf(
-			"failed to remove omap %s csi.volume.%s with error %v",
+			"failed to remove omap %s csi.volume.%s: %v",
 			rbdOptions(pool),
 			imageData.imageID,
 			stdErr)
@@ -855,72 +1024,11 @@ func deletePVCCSIJournalInPool(f *framework.Framework, pvc *v1.PersistentVolumeC
 	}
 	if stdErr != "" {
 		return fmt.Errorf(
-			"failed to remove %s csi.volumes.default csi.volume.%s with error %v",
+			"failed to remove %s csi.volumes.default csi.volume.%s: %v",
 			rbdOptions(pool),
 			imageData.imageID,
 			stdErr)
 	}
-
-	return nil
-}
-
-func validateThickPVC(f *framework.Framework, pvc *v1.PersistentVolumeClaim, size string) error {
-	pvc.Namespace = f.UniqueName
-	pvc.Spec.Resources.Requests[v1.ResourceStorage] = resource.MustParse(size)
-
-	err := createPVCAndvalidatePV(f.ClientSet, pvc, deployTimeout)
-	if err != nil {
-		return fmt.Errorf("failed to create PVC with error %w", err)
-	}
-	validateRBDImageCount(f, 1, defaultRBDPool)
-
-	err = validateThickImageMetadata(f, pvc, thickProvisionMetaKey)
-	if err != nil {
-		return fmt.Errorf("failed to validate thick image: %w", err)
-	}
-	// nothing has been written, but the image should be allocated
-	du, err := getRbdDu(f, pvc)
-	if err != nil {
-		return fmt.Errorf("failed to get allocations of RBD image: %w", err)
-	} else if du.UsedSize == 0 || du.UsedSize != du.ProvisionedSize {
-		return fmt.Errorf("backing RBD image is not thick-provisioned (%d/%d)", du.UsedSize, du.ProvisionedSize)
-	}
-
-	// expanding the PVC should thick-allocate the expansion
-	// nolint:gomnd // we want 2x the size so that extending is done
-	newSize := du.ProvisionedSize * 2
-	err = expandPVCSize(f.ClientSet, pvc, fmt.Sprintf("%d", newSize), deployTimeout)
-	if err != nil {
-		return fmt.Errorf("failed to expand PVC: %w", err)
-	}
-
-	// after expansion, the updated 'du' should be larger
-	du, err = getRbdDu(f, pvc)
-	if err != nil {
-		return fmt.Errorf("failed to get allocations of RBD image: %w", err)
-	} else if du.UsedSize != newSize {
-		return fmt.Errorf("backing RBD image is not extended thick-provisioned (%d/%d)", du.UsedSize, newSize)
-	}
-
-	// thick provisioning allows for sparsifying
-	err = sparsifyBackingRBDImage(f, pvc)
-	if err != nil {
-		return fmt.Errorf("failed to sparsify RBD image: %w", err)
-	}
-
-	// after sparsifying the image should not have any allocations
-	du, err = getRbdDu(f, pvc)
-	if err != nil {
-		return fmt.Errorf("backing RBD image is not thick-provisioned: %w", err)
-	} else if du.UsedSize != 0 {
-		return fmt.Errorf("backing RBD image was not sparsified (%d bytes allocated)", du.UsedSize)
-	}
-
-	err = deletePVCAndValidatePV(f.ClientSet, pvc, deployTimeout)
-	if err != nil {
-		return fmt.Errorf("failed to delete PVC with error: %w", err)
-	}
-	validateRBDImageCount(f, 0, defaultRBDPool)
 
 	return nil
 }
@@ -935,7 +1043,7 @@ func listRBDImagesInTrash(f *framework.Framework, poolName string) ([]trashInfo,
 	var trashInfos []trashInfo
 
 	stdout, stdErr, err := execCommandInToolBoxPod(f,
-		fmt.Sprintf("rbd trash ls --format=json %s", rbdOptions(poolName)), rookNamespace)
+		"rbd trash ls --format=json "+rbdOptions(poolName), rookNamespace)
 	if err != nil {
 		return trashInfos, err
 	}
@@ -954,7 +1062,7 @@ func listRBDImagesInTrash(f *framework.Framework, poolName string) ([]trashInfo,
 func waitToRemoveImagesFromTrash(f *framework.Framework, poolName string, t int) error {
 	var errReason error
 	timeout := time.Duration(t) * time.Minute
-	err := wait.PollImmediate(poll, timeout, func() (bool, error) {
+	err := wait.PollUntilContextTimeout(context.TODO(), poll, timeout, true, func(_ context.Context) (bool, error) {
 		imagesInTrash, err := listRBDImagesInTrash(f, poolName)
 		if err != nil {
 			return false, err
@@ -963,14 +1071,123 @@ func waitToRemoveImagesFromTrash(f *framework.Framework, poolName string, t int)
 			return true, nil
 		}
 		errReason = fmt.Errorf("found %d images found in trash. Image details %v", len(imagesInTrash), imagesInTrash)
-		e2elog.Logf(errReason.Error())
+		framework.Logf("%v", errReason.Error())
 
 		return false, nil
 	})
 
-	if errors.Is(err, wait.ErrWaitTimeout) {
+	if wait.Interrupted(err) {
 		err = errReason
 	}
 
 	return err
+}
+
+// imageInfo strongly typed JSON spec for image info.
+type imageInfo struct {
+	Name        string `json:"name"`
+	StripeUnit  int    `json:"stripe_unit"`
+	StripeCount int    `json:"stripe_count"`
+	ObjectSize  int    `json:"object_size"`
+}
+
+// getImageInfo queries rbd about the given image and returns its metadata, and returns
+// error if provided image is not found.
+func getImageInfo(f *framework.Framework, imageName, poolName string) (string, error) {
+	// rbd --format=json info [image-spec | snap-spec]
+	stdOut, stdErr, err := execCommandInToolBoxPod(
+		f,
+		fmt.Sprintf("rbd info %s %s --format json", rbdOptions(poolName), imageName),
+		rookNamespace)
+	if err != nil {
+		return stdOut, fmt.Errorf("failed to get rbd info: %w", err)
+	}
+	if stdErr != "" {
+		return stdOut, fmt.Errorf("failed to get rbd info: %v", stdErr)
+	}
+
+	return stdOut, nil
+}
+
+// getImageStatus queries rbd about the given image and returns its metadata, and returns
+// error if provided image is not found.
+func getImageStatus(f *framework.Framework, imageName, poolName string) (string, error) {
+	// rbd --format=json status [image-spec | snap-spec]
+	stdOut, stdErr, err := execCommandInToolBoxPod(
+		f,
+		fmt.Sprintf("rbd status %s %s --format json", rbdOptions(poolName), imageName),
+		rookNamespace)
+	if err != nil {
+		return stdOut, fmt.Errorf("error retrieving rbd status: %w", err)
+	}
+	if stdErr != "" {
+		return stdOut, fmt.Errorf("failed to get rbd info: %v", stdErr)
+	}
+
+	return stdOut, nil
+}
+
+// validateStripe validate the stripe count, stripe unit and object size of the
+// image.
+func validateStripe(f *framework.Framework,
+	pvc *v1.PersistentVolumeClaim,
+	stripeUnit,
+	stripeCount,
+	objectSize int,
+) error {
+	var imgInfo imageInfo
+
+	imageData, err := getImageInfoFromPVC(pvc.Namespace, pvc.Name, f)
+	if err != nil {
+		return err
+	}
+
+	imgInfoStr, err := getImageInfo(f, imageData.imageName, defaultRBDPool)
+	if err != nil {
+		return err
+	}
+
+	err = json.Unmarshal([]byte(imgInfoStr), &imgInfo)
+	if err != nil {
+		return fmt.Errorf("unmarshal failed: %w. raw buffer response: %s", err, imgInfoStr)
+	}
+
+	if imgInfo.ObjectSize != objectSize {
+		return fmt.Errorf("objectSize %d does not match expected %d", imgInfo.ObjectSize, objectSize)
+	}
+
+	if imgInfo.StripeUnit != stripeUnit {
+		return fmt.Errorf("stripeUnit %d does not match expected %d", imgInfo.StripeUnit, stripeUnit)
+	}
+
+	if imgInfo.StripeCount != stripeCount {
+		return fmt.Errorf("stripeCount %d does not match expected %d", imgInfo.StripeCount, stripeCount)
+	}
+
+	return nil
+}
+
+func validateQOS(f *framework.Framework,
+	pvc *v1.PersistentVolumeClaim,
+	wants map[string]string,
+) error {
+	metadataConfPrefix := "conf_"
+
+	imageData, err := getImageInfoFromPVC(pvc.Namespace, pvc.Name, f)
+	if err != nil {
+		return err
+	}
+
+	rbdImageSpec := imageSpec(defaultRBDPool, imageData.imageName)
+	for k, v := range wants {
+		qosVal, err := getImageMeta(rbdImageSpec, metadataConfPrefix+k, f)
+		if err != nil {
+			return err
+		}
+		if qosVal != v {
+			return fmt.Errorf("%s: %s does not match expected %s", k, qosVal, v)
+		}
+	}
+
+	return nil
 }

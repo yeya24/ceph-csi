@@ -1,6 +1,7 @@
 # Capabilities of a user required for ceph-csi in a Ceph cluster
 
-Ceph uses the term capabilities to describe authorizing an authenticated user
+Ceph uses the term _capabilities_ to describe authorizations for an
+authenticated user
 to exercise the functionality of the monitors, OSDs and metadata servers.
 Capabilities can also restrict access to data within a pool or pool namespace.
 A Ceph administrative user sets a user's capabilities when creating or
@@ -10,53 +11,35 @@ Hence, those capabilities are documented below.
 
 ## RBD
 
-We have provisioner, controller expand and node stage secrets in storage class.
-For the provisioner and controller expand stage secret in storageclass, the
-user needs to have the  below mentioned ceph capabilities.
+We have provisioner, controller expand and node stage secrets in storageclass.
+For RBD the user needs to have the below Ceph capabilities:
 
 ```
-"mon", "profile rbd",
-"mgr", "allow rw",
-"osd", "profile rbd"
-```
-
-And for the node stage secret in storageclass, the user needs to have the
-below mentioned ceph capabilities.
-
-```
-"mon", "profile rbd",
-"osd", "profile rbd",
-"mgr", "allow rw"
+mgr "profile rbd pool=csi"
+osd "profile rbd pool=csi"
+mon "profile rbd"
 ```
 
 ## CephFS
 
-Similarly in CephFS, for the provisioner and controller expand stage secret in
-storageclass, the user needs to have the below mentioned ceph capabilities.
+Similarly in CephFS, we have provisioner, controller expand and node stage
+secrets in storageclass, the user needs to have the below mentioned ceph
+capabilities:
 
 ```
-"mon", "allow r",
-"mgr", "allow rw",
-"osd", "allow rw tag cephfs metadata=*"
+mgr "allow rw"
+osd "allow rw tag cephfs metadata=cephfs, allow rw tag cephfs data=cephfs"
+mds "allow r fsname=cephfs path=/volumes, allow rws fsname=cephfs path=/volumes/csi"
+mon "allow r fsname=cephfs"
 ```
 
-And for node stage secret in storageclass, the user needs to have
-the below mentioned ceph capabilities.
-
-```
-"mon", "allow r",
-"mgr", "allow rw",
-"osd", "allow rw tag cephfs *=*",
-"mds", "allow rw"
-```
-
-To get more insights on capabilities of cephfs you can refer
+To get more insights on capabilities of CephFS you can refer
 [this document](https://ceph.readthedocs.io/en/latest/cephfs/client-auth/)
 
 ## Command to a create user with required capabilities
 
-`kubernetes` in the below commands represents an user which is subjected
-to change as per your requirement.
+`USER`, `POOL` and `FS_NAME` with `SUB_VOL` variables below is subject to
+change, please adjust them to your needs.
 
 ### create user for RBD
 
@@ -64,25 +47,23 @@ The command for provisioner and node stage secret for rbd will be same as
 they have similar capability requirements.
 
 ```bash
-ceph auth get-or-create client.kubernetes \
-mon 'profile rbd' \
-osd 'profile rbd' \
-mgr 'allow rw'
+USER=csi-rbd
+POOL=csi
+ceph auth get-or-create client.$USER \
+  mgr "profile rbd pool=$POOL" \
+  osd "profile rbd pool=$POOL"
+  mon "profile rbd"
 ```
 
 ### create user for CephFS
 
 ```bash
-ceph auth get-or-create client.kubernetes \
-mon 'allow r' \
-osd 'allow rw tag cephfs metadata=*' \
-mgr 'allow rw'
-```
-
-```bash
-ceph auth get-or-create client.kubernetes \
-mon 'allow r' \
-osd 'allow rw tag cephfs *=*' \
-mgr 'allow rw' \
-mds 'allow rw'
+USER=csi-cephfs
+FS_NAME=cephfs
+SUB_VOL=csi
+ceph auth get-or-create client.$USER \
+  mgr "allow rw" \
+  osd "allow rw tag cephfs metadata=$FS_NAME, allow rw tag cephfs data=$FS_NAME" \
+  mds "allow r fsname=$FS_NAME path=/volumes, allow rws fsname=$FS_NAME path=/volumes/$SUB_VOL" \
+  mon "allow r fsname=$FS_NAME"
 ```

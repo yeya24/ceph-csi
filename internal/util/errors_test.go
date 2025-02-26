@@ -1,5 +1,5 @@
 /*
-Copyright 2020 ceph-csi authors.
+Copyright 2025 The Ceph-CSI Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,54 +18,58 @@ package util
 
 import (
 	"errors"
-	"fmt"
 	"testing"
+
+	"github.com/ceph/go-ceph/rados"
 )
 
-var (
-	errFoo = errors.New("foo")
-	errBar = errors.New("bar")
-)
-
-func wrapError(e error) error {
-	return fmt.Errorf("w{%w}", e)
-}
-
-func TestJoinErrors(t *testing.T) {
+func Test_shouldRetryVolumeGeneration(t *testing.T) {
 	t.Parallel()
-	assertErrorIs := func(e1, e2 error, ok bool) {
-		if errors.Is(e1, e2) != ok {
-			t.Errorf("errors.Is(e1, e2) != %v - e1: %#v - e2: %#v", ok, e1, e2)
-		}
+	type args struct {
+		err error
 	}
-
-	assertErrorIs(errFoo, errBar, false)
-	assertErrorIs(errFoo, errFoo, true)
-
-	fooBar := JoinErrors(errFoo, errBar)
-	assertErrorIs(fooBar, errFoo, true)
-	assertErrorIs(fooBar, errBar, true)
-
-	w2Foo := wrapError(wrapError(errFoo))
-	w1Bar := wrapError(errBar)
-	w1w2Foow1Bar := wrapError(JoinErrors(w2Foo, w1Bar))
-	assertErrorIs(w1w2Foow1Bar, errFoo, true)
-	assertErrorIs(w1w2Foow1Bar, errBar, true)
-
-	w2X := wrapError(wrapError(errors.New("x")))
-	w2FooBar := wrapError(wrapError(fooBar))
-	w1w2Xw2FooBar := wrapError(JoinErrors(w2X, w2FooBar))
-	assertErrorIs(w1w2Xw2FooBar, errFoo, true)
-	assertErrorIs(w1w2Xw2FooBar, errBar, true)
-
-	x := errors.Unwrap(errors.Unwrap(errors.Unwrap(errors.Unwrap(w1w2Xw2FooBar))))
-	assertErrorIs(x, fooBar, true)
-	x = errors.Unwrap(x)
-	assertErrorIs(x, fooBar, false)
-	assertErrorIs(x, errFoo, false)
-	assertErrorIs(x, errBar, true)
-	s1 := "w{w{w{x}}: w{w{foo: bar}}}"
-	if s2 := w1w2Xw2FooBar.Error(); s1 != s2 {
-		t.Errorf("%s != %s", s1, s2)
+	tests := []struct {
+		name string
+		args args
+		want bool
+	}{
+		{
+			name: "No error (stop searching)",
+			args: args{err: nil},
+			want: false, // No error, stop searching
+		},
+		{
+			name: "ErrKeyNotFound (continue searching)",
+			args: args{err: ErrKeyNotFound},
+			want: true, // Known error, continue searching
+		},
+		{
+			name: "ErrPoolNotFound (continue searching)",
+			args: args{err: ErrPoolNotFound},
+			want: true, // Known error, continue searching
+		},
+		{
+			name: "ErrImageNotFound (continue searching)",
+			args: args{err: ErrImageNotFound},
+			want: true, // Known error, continue searching
+		},
+		{
+			name: "ErrPermissionDenied (continue searching)",
+			args: args{err: rados.ErrPermissionDenied},
+			want: true, // Known error, continue searching
+		},
+		{
+			name: "Different error (stop searching)",
+			args: args{err: errors.New("unknown error")},
+			want: false, // Unknown error, stop searching
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ShouldRetryVolumeGeneration(tt.args.err); got != tt.want {
+				t.Errorf("ShouldRetryVolumeGeneration() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

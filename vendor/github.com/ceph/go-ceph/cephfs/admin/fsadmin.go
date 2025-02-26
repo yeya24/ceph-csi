@@ -1,5 +1,3 @@
-// +build !luminous,!mimic
-
 package admin
 
 import (
@@ -17,26 +15,6 @@ type RadosCommander = ccom.RadosCommander
 // FSAdmin is used to administrate CephFS within a ceph cluster.
 type FSAdmin struct {
 	conn RadosCommander
-}
-
-// New creates an FSAdmin automatically based on the default ceph
-// configuration file. If more customization is needed, create a
-// *rados.Conn as you see fit and use NewFromConn to use that
-// connection with these administrative functions.
-func New() (*FSAdmin, error) {
-	conn, err := rados.NewConn()
-	if err != nil {
-		return nil, err
-	}
-	err = conn.ReadDefaultConfigFile()
-	if err != nil {
-		return nil, err
-	}
-	err = conn.Connect()
-	if err != nil {
-		return nil, err
-	}
-	return NewFromConn(conn), nil
 }
 
 // NewFromConn creates an FSAdmin management object from a preexisting
@@ -93,6 +71,15 @@ func parseListNames(res response) ([]string, error) {
 		vl[i] = r[i].Name
 	}
 	return vl, nil
+}
+
+func parseListKeyValues(res response) (map[string]string, error) {
+	var x map[string]string
+	if err := res.NoStatus().Unmarshal(&x).End(); err != nil {
+		return nil, err
+	}
+
+	return x, nil
 }
 
 // parsePathResponse returns a cleaned up path from requests that get a path

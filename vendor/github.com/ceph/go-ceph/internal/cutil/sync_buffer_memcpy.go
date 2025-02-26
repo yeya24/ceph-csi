@@ -1,4 +1,5 @@
-// +build !ptrguard
+//go:build no_ptrguard
+// +build no_ptrguard
 
 package cutil
 

@@ -22,7 +22,7 @@ function copy_image_to_cluster() {
     if [ -z "$(${CONTAINER_CMD} images -q "${build_image}")" ]; then
         ${CONTAINER_CMD} pull "${build_image}"
     fi
-    if [[ "${VM_DRIVER}" == "none" ]]; then
+    if [[ "${VM_DRIVER}" == "none" ]] || [[ "${VM_DRIVER}" == "podman" ]]; then
         ${CONTAINER_CMD} tag "${build_image}" "${final_image}"
         return
     fi
@@ -42,6 +42,15 @@ function copy_image_to_cluster() {
 minikube_version() {
     echo "${MINIKUBE_VERSION}" | sed 's/^v//' | cut -d'.' -f"${1}"
 }
+
+# parse the kubernetes version, return the digit passed as argument
+# v1.21.0 -> kube_version 1 -> 1
+# v1.21.0 -> kube_version 2 -> 21
+# v1.21.0 -> kube_version 3 -> 0
+kube_version() {
+    echo "${KUBE_VERSION}" | sed 's/^v//' | cut -d'.' -f"${1}"
+}
+
 
 # detect if there is a minikube executable available already. If there is none,
 # fallback to using /usr/local/bin/minikube, as that is where
@@ -76,7 +85,7 @@ function install_minikube() {
     fi
 
     echo "Installing minikube. Version: ${MINIKUBE_VERSION}"
-    curl -Lo minikube https://storage.googleapis.com/minikube/releases/"${MINIKUBE_VERSION}"/minikube-linux-"${MINIKUBE_ARCH}" && chmod +x minikube && mv minikube /usr/local/bin/
+    curl -Lo minikube https://storage.googleapis.com/minikube/releases/"${MINIKUBE_VERSION}"/minikube-linux-"${MINIKUBE_ARCH}" && chmod +x minikube && sudo mv minikube /usr/local/bin/
 }
 
 function detect_kubectl() {
@@ -115,11 +124,49 @@ function validate_container_cmd() {
     fi
 }
 
-function enable_psp() {
-    echo "prepare minikube to support pod security policies"
-    mkdir -p "$HOME"/.minikube/files/etc/kubernetes/addons
-    DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-    cp "$DIR"/psp.yaml "$HOME"/.minikube/files/etc/kubernetes/addons/psp.yaml
+# validate csi sidecar image version
+function validate_sidecar() {
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# shellcheck disable=SC1091
+    source "${SCRIPT_DIR}/../build.env"
+
+    sidecars=(CSI_ATTACHER_VERSION CSI_SNAPSHOTTER_VERSION CSI_PROVISIONER_VERSION CSI_RESIZER_VERSION CSI_NODE_DRIVER_REGISTRAR_VERSION)
+    for sidecar in "${sidecars[@]}"; do
+        if [[ -z "${!sidecar}" ]]; then
+	   echo "${sidecar}" version is empty, make sure build.env has set this sidecar version
+	   exit 1
+    fi
+done
+}
+
+# install_podman_wrapper creates /usr/bin/podman.wrapper which adds /sys
+# filesystem mount points when a privileged container is started. This makes it
+# possible to map RBD devices in the container that minikube creates when
+# VM_DRIVER=podman is used.
+function install_podman_wrapper() {
+    if [[ -e /usr/bin/podman.wrapper ]]
+    then
+        return
+    fi
+
+    # disabled single quoted check, the script should be created as is
+    # shellcheck disable=SC2016
+    echo '#!/bin/sh
+if [[ "${1}" = run ]]
+then
+    if (echo "${@}" | grep -q privileged)
+    then
+        shift
+        exec /usr/bin/podman.real run -v /sys:/sys:rw -v /dev:/dev:rw --systemd=true "${@}"
+    fi
+fi
+
+exec /usr/bin/podman.real "${@}"
+' > /usr/bin/podman.wrapper
+    chmod +x /usr/bin/podman.wrapper
+
+    mv /usr/bin/podman /usr/bin/podman.real
+    ln -s podman.wrapper /usr/bin/podman
 }
 
 # Storage providers and the default storage class is not needed for Ceph-CSI
@@ -130,22 +177,10 @@ function disable_storage_addons() {
     ${minikube} addons disable storage-provisioner 2>/dev/null || true
 }
 
-function minikube_supports_psp() {
-    local MINIKUBE_MAJOR
-    local MINIKUBE_MINOR
-    local MINIKUBE_PATCH
-    MINIKUBE_MAJOR=$(minikube_version 1)
-    MINIKUBE_MINOR=$(minikube_version 2)
-    MINIKUBE_PATCH=$(minikube_version 3)
-    if [[ "${MINIKUBE_MAJOR}" -ge 1 ]] && [[ "${MINIKUBE_MINOR}" -ge 11 ]] && [[ "${MINIKUBE_PATCH}" -ge 1 ]] || [[ "${MINIKUBE_MAJOR}" -ge 1 ]] && [[ "${MINIKUBE_MINOR}" -ge 12 ]]; then
-        return 1
-    fi
-    return 0
-}
-
 # configure minikube
 MINIKUBE_ARCH=${MINIKUBE_ARCH:-"amd64"}
 MINIKUBE_VERSION=${MINIKUBE_VERSION:-"latest"}
+MINIKUBE_ISO_URL=${MINIKUBE_ISO_URL:-""}
 KUBE_VERSION=${KUBE_VERSION:-"latest"}
 CONTAINER_CMD=${CONTAINER_CMD:-"docker"}
 MEMORY=${MEMORY:-"4096"}
@@ -154,31 +189,38 @@ MINIKUBE_WAIT=${MINIKUBE_WAIT:-"all"}
 CPUS=${CPUS:-"$(nproc)"}
 VM_DRIVER=${VM_DRIVER:-"virtualbox"}
 CNI=${CNI:-"bridge"}
+NUM_DISKS=${NUM_DISKS:-"1"}
+DISK_SIZE=${DISK_SIZE:-"32g"}
 #configure image repo
 CEPHCSI_IMAGE_REPO=${CEPHCSI_IMAGE_REPO:-"quay.io/cephcsi"}
-K8S_IMAGE_REPO=${K8S_IMAGE_REPO:-"k8s.gcr.io/sig-storage"}
+K8S_IMAGE_REPO=${K8S_IMAGE_REPO:-"registry.k8s.io/sig-storage"}
 DISK="sda1"
 if [[ "${VM_DRIVER}" == "kvm2" ]]; then
     # use vda1 instead of sda1 when running with the libvirt driver
     DISK="vda1"
 fi
-#configure csi sidecar version
-CSI_ATTACHER_VERSION=${CSI_ATTACHER_VERSION:-"v3.2.1"}
-CSI_SNAPSHOTTER_VERSION=${CSI_SNAPSHOTTER_VERSION:-"v4.1.1"}
-CSI_PROVISIONER_VERSION=${CSI_PROVISIONER_VERSION:-"v2.2.2"}
-CSI_RESIZER_VERSION=${CSI_RESIZER_VERSION:-"v1.2.0"}
-CSI_NODE_DRIVER_REGISTRAR_VERSION=${CSI_NODE_DRIVER_REGISTRAR_VERSION:-"v2.2.0"}
+
+if [[ "${VM_DRIVER}" == "kvm2" ]] || [[ "${VM_DRIVER}" == "hyperkit" ]] || [[ "${VM_DRIVER}" == "qemu2" ]]; then
+    # adding extra disks is only supported on kvm2 and hyperkit
+    DISK_CONFIG=${DISK_CONFIG:-" --extra-disks=${NUM_DISKS} --disk-size=${DISK_SIZE} "}
+else
+    DISK_CONFIG=""
+fi
+
+if [[ -n "${MINIKUBE_ISO_URL}" ]]; then
+    EXTRA_CONFIG="${EXTRA_CONFIG} --iso-url ${MINIKUBE_ISO_URL}"
+fi
+
+# configure csi image version
+CSI_IMAGE_VERSION=${CSI_IMAGE_VERSION:-"canary"}
 
 #feature-gates for kube
-K8S_FEATURE_GATES=${K8S_FEATURE_GATES:-"ExpandCSIVolumes=true"}
-
-#extra-config for kube https://minikube.sigs.k8s.io/docs/reference/configuration/kubernetes/
-EXTRA_CONFIG_PSP="--extra-config=apiserver.enable-admission-plugins=PodSecurityPolicy"
+K8S_FEATURE_GATES=${K8S_FEATURE_GATES:-""}
 
 # kubelet.resolv-conf needs to point to a file, not a symlink
 # the default minikube VM has /etc/resolv.conf -> /run/systemd/resolve/resolv.conf
-RESOLV_CONF='/run/systemd/resolve/resolv.conf'
-if [[ "${VM_DRIVER}" == "none" ]] && [[ ! -e "${RESOLV_CONF}" ]]; then
+RESOLV_CONF="${RESOLV_CONF:-/run/systemd/resolve/resolv.conf}"
+if { [[ "${VM_DRIVER}" == "none" ]] || [[ "${VM_DRIVER}" == "podman" ]]; } && [[ ! -e "${RESOLV_CONF}" ]]; then
 	# in case /run/systemd/resolve/resolv.conf does not exist, use the
 	# standard /etc/resolv.conf (with symlink resolved)
 	RESOLV_CONF="$(readlink -f /etc/resolv.conf)"
@@ -189,6 +231,7 @@ EXTRA_CONFIG="${EXTRA_CONFIG} --extra-config=kubelet.resolv-conf=${RESOLV_CONF}"
 
 #extra Rook configuration
 ROOK_BLOCK_POOL_NAME=${ROOK_BLOCK_POOL_NAME:-"newrbdpool"}
+ROOK_BLOCK_EC_POOL_NAME=${ROOK_BLOCK_EC_POOL_NAME:-"ec-pool"}
 
 # enable read-only anonymous access to kubelet metrics
 EXTRA_CONFIG="${EXTRA_CONFIG} --extra-config=kubelet.read-only-port=10255"
@@ -208,33 +251,28 @@ up)
     if [[ "${VM_DRIVER}" == "none" ]]; then
         mkdir -p "$HOME"/.kube "$HOME"/.minikube
         install_kubectl
+    elif [[ "${VM_DRIVER}" == "podman" ]]; then
+        install_podman_wrapper
     fi
 
-    disable_storage_addons
-
-    echo "starting minikube with kubeadm bootstrapper"
-    if minikube_supports_psp; then
-        enable_psp
-        # shellcheck disable=SC2086
-        ${minikube} start --force --memory="${MEMORY}" --cpus="${CPUS}" -b kubeadm --kubernetes-version="${KUBE_VERSION}" --driver="${VM_DRIVER}" --feature-gates="${K8S_FEATURE_GATES}" --cni="${CNI}" ${EXTRA_CONFIG} ${EXTRA_CONFIG_PSP} --wait-timeout="${MINIKUBE_WAIT_TIMEOUT}" --wait="${MINIKUBE_WAIT}" --delete-on-failure
-    else
-        # This is a workaround to fix psp issues in minikube >1.6.2 and <1.11.0
-        # shellcheck disable=SC2086
-        ${minikube} start --force --memory="${MEMORY}" --cpus="${CPUS}" -b kubeadm --kubernetes-version="${KUBE_VERSION}" --driver="${VM_DRIVER}" --feature-gates="${K8S_FEATURE_GATES}" --cni="${CNI}" ${EXTRA_CONFIG} --wait-timeout="${MINIKUBE_WAIT_TIMEOUT}" --wait="${MINIKUBE_WAIT}" --delete-on-failure
-        DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-        ${minikube} kubectl -- apply -f "$DIR"/psp.yaml
-        ${minikube} stop
-        # shellcheck disable=SC2086
-        ${minikube} start --force --memory="${MEMORY}" --cpus="${CPUS}" -b kubeadm --kubernetes-version="${KUBE_VERSION}" --driver="${VM_DRIVER}" --feature-gates="${K8S_FEATURE_GATES}" --cni="${CNI}" ${EXTRA_CONFIG} ${EXTRA_CONFIG_PSP} --wait-timeout="${MINIKUBE_WAIT_TIMEOUT}" --wait="${MINIKUBE_WAIT}"
-    fi
-
+    # shellcheck disable=SC2086
+    ${minikube} start --force --memory="${MEMORY}" --cpus="${CPUS}" -b kubeadm --kubernetes-version="${KUBE_VERSION}" --driver="${VM_DRIVER}" --feature-gates="${K8S_FEATURE_GATES}" --cni="${CNI}" ${EXTRA_CONFIG}  --wait-timeout="${MINIKUBE_WAIT_TIMEOUT}" --wait="${MINIKUBE_WAIT}" --delete-on-failure ${DISK_CONFIG}
+    # shellcheck disable=SC2086
+    ${minikube} ssh "sudo  sed -i 's/\(ExecStart=\/var.*\)/\1 --v=4/' /etc/systemd/system/kubelet.service.d/10-kubeadm.conf"
+    ${minikube} ssh "sudo systemctl daemon-reload"
+    ${minikube} ssh "sudo systemctl restart kubelet"
+    ${minikube} ssh "ps -Af |grep kubelet"
     # create a link so the default dataDirHostPath will work for this
     # environment
-    if [[ "${VM_DRIVER}" != "none" ]]; then
+    if [[ "${VM_DRIVER}" != "none" ]] && [[ "${VM_DRIVER}" != "podman" ]]; then
         wait_for_ssh
         # shellcheck disable=SC2086
         ${minikube} ssh "sudo mkdir -p /mnt/${DISK}/var/lib/rook;sudo ln -s /mnt/${DISK}/var/lib/rook /var/lib/rook"
     fi
+    if [[ "${VM_DRIVER}" = "podman" ]]; then
+        ${minikube} ssh "sudo mount -oremount,rw /sys"
+    fi
+    disable_storage_addons
     ${minikube} kubectl -- cluster-info
     ;;
 down)
@@ -264,6 +302,16 @@ delete-block-pool)
     DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
     "$DIR"/rook.sh delete-block-pool
     ;;
+create-block-ec-pool)
+    echo "creating a erasure coded block pool named $ROOK_BLOCK_EC_POOL_NAME"
+    DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+    "$DIR"/rook.sh create-block-ec-pool
+    ;;
+delete-block-ec-pool)
+    echo "deleting erasure coded block pool named $ROOK_BLOCK_EC_POOL_NAME"
+    DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+    "$DIR"/rook.sh delete-block-ec-pool
+    ;;
 cleanup-snapshotter)
     echo "cleanup snapshot controller"
     DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
@@ -280,9 +328,11 @@ teardown-rook)
     ;;
 cephcsi)
     echo "copying the cephcsi image"
-    copy_image_to_cluster "${CEPHCSI_IMAGE_REPO}"/cephcsi:canary "${CEPHCSI_IMAGE_REPO}"/cephcsi:canary
+    copy_image_to_cluster "${CEPHCSI_IMAGE_REPO}"/cephcsi:"${CSI_IMAGE_VERSION}" "${CEPHCSI_IMAGE_REPO}"/cephcsi:"${CSI_IMAGE_VERSION}"
     ;;
 k8s-sidecar)
+    echo "validating sidecar's image version"
+    validate_sidecar
     echo "copying the kubernetes sidecar images"
     copy_image_to_cluster "${K8S_IMAGE_REPO}/csi-attacher:${CSI_ATTACHER_VERSION}" "${K8S_IMAGE_REPO}/csi-attacher:${CSI_ATTACHER_VERSION}"
     copy_image_to_cluster "${K8S_IMAGE_REPO}/csi-snapshotter:${CSI_SNAPSHOTTER_VERSION}" "${K8S_IMAGE_REPO}/csi-snapshotter:${CSI_SNAPSHOTTER_VERSION}"
@@ -304,6 +354,8 @@ Available Commands:
   install-snapshotter  Install snapshot controller
   create-block-pool    Creates a rook block pool (named $ROOK_BLOCK_POOL_NAME)
   delete-block-pool    Deletes a rook block pool (named $ROOK_BLOCK_POOL_NAME)
+  create-block-ec-pool Creates a rook erasure coded block pool (named $ROOK_BLOCK_EC_POOL_NAME)
+  delete-block-ec-pool Creates a rook erasure coded block pool (named $ROOK_BLOCK_EC_POOL_NAME)
   cleanup-snapshotter  Cleanup snapshot controller
   teardown-rook        Teardown rook from minikube
   cephcsi              Copy built docker images to kubernetes cluster

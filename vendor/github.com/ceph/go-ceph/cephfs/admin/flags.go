@@ -1,5 +1,3 @@
-// +build !luminous,!mimic
-
 package admin
 
 // For APIs that accept extra sets of "boolean" flags we may end up wanting

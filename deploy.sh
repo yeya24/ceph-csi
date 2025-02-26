@@ -14,10 +14,10 @@ GITHUB_EMAIL=${GITHUB_EMAIL:-"ceph-csi-bot@users.noreply.github.com"}
 
 # Build and push images. Steps as below:
 # 1. get base image from ./build.env (BASE_IMAGE=ceph/ceph:v14.2)
-# 2. parse manifest to get image digest per arch (sha256:XXX, sha256:YYY)
-# 3. patch Dockerfile with amd64 base image (FROM ceph/ceph:v14.2@sha256:XXX)
+# 2. parse manifest to get image digest per arch (sha256:XYZ, sha256:ZYX)
+# 3. patch Dockerfile with amd64 base image (FROM ceph/ceph:v14.2@sha256:XYZ)
 # 4. build and push amd64 image
-# 5. patch Dockerfile with arm64 base image (FROM ceph/ceph:v14.2@sha256:YYY)
+# 5. patch Dockerfile with arm64 base image (FROM ceph/ceph:v14.2@sha256:ZYX)
 # 6. build and push arm64 image
 build_push_images() {
 	# "docker manifest" requires experimental feature enabled
@@ -29,11 +29,11 @@ build_push_images() {
 	# get image digest per architecture
 	# {
 	#   "arch": "amd64",
-	#   "digest": "sha256:XXX"
+	#   "digest": "sha256:XYZ"
 	# }
 	# {
 	#   "arch": "arm64",
-	#   "digest": "sha256:YYY"
+	#   "digest": "sha256:ZYX"
 	# }
 	manifests=$(docker manifest inspect "${baseimg}" | jq '.manifests[] | {arch: .platform.architecture, digest: .digest}')
 	# qemu-user-static is to enable an execution of different multi-architecture containers by QEMU
@@ -77,13 +77,14 @@ push_helm_charts() {
 	fi
 
 	mkdir -p "${CHARTDIR}/csi-charts/docs/${PACKAGE}"
-	cp -R "./charts/ceph-csi-${PACKAGE}" "${CHARTDIR}/csi-charts/docs/${PACKAGE}"
+	# Use rsync to remove files from  destination when source file is deleted.
+	rsync -avh "./charts/ceph-csi-${PACKAGE}" "${CHARTDIR}/csi-charts/docs/${PACKAGE}" --delete
 	pushd "${CHARTDIR}/csi-charts/docs/${PACKAGE}" >/dev/null
 	helm package "ceph-csi-${PACKAGE}"
 	popd >/dev/null
 
 	pushd "${CHARTDIR}/csi-charts/docs" >/dev/null
-	helm repo index .
+	helm repo index . --url "https://ceph.github.io/csi-charts/"
 	git config user.name "${GITHUB_USER}"
 	git config user.email "${GITHUB_EMAIL}"
 	git add --all :/ && git commit -m "Update for helm charts ${PACKAGE}-${VERSION}"
@@ -103,7 +104,7 @@ CSI_CHARTS_DIR=$(mktemp -d)
 
 pushd "${CSI_CHARTS_DIR}" >/dev/null
 
-curl -L https://git.io/get_helm.sh | bash -s -- --version "${HELM_VERSION}"
+curl -L "${HELM_SCRIPT}" | bash -s -- --version "${HELM_VERSION}"
 
 build_step "cloning ceph/csi-charts repository"
 git clone https://github.com/ceph/csi-charts

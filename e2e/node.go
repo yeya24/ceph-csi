@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Ceph-CSI Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2e
 
 import (
@@ -9,9 +25,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
+	testutils "k8s.io/kubernetes/test/utils"
 )
 
-func createNodeLabel(f *framework.Framework, labelKey, labelValue string) error {
+func addLabelsToNodes(f *framework.Framework, labels map[string]string) error {
 	// NOTE: This makes all nodes (in a multi-node setup) in the test take
 	//       the same label values, which is fine for the test
 	nodes, err := f.ClientSet.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
@@ -19,19 +37,27 @@ func createNodeLabel(f *framework.Framework, labelKey, labelValue string) error 
 		return fmt.Errorf("failed to list node: %w", err)
 	}
 	for i := range nodes.Items {
-		framework.AddOrUpdateLabelOnNode(f.ClientSet, nodes.Items[i].Name, labelKey, labelValue)
+		if err := testutils.AddLabelsToNode(f.ClientSet, nodes.Items[i].Name, labels); err != nil {
+			return fmt.Errorf("failed to add labels to node: %w", err)
+		}
 	}
 
 	return nil
 }
 
-func deleteNodeLabel(c kubernetes.Interface, labelKey string) error {
+func deleteNodeLabels(c kubernetes.Interface, labelKeys []string) error {
 	nodes, err := c.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to list node: %w", err)
 	}
 	for i := range nodes.Items {
-		framework.RemoveLabelOffNode(c, nodes.Items[i].Name, labelKey)
+		if err := testutils.RemoveLabelOffNode(c, nodes.Items[i].Name, labelKeys); err != nil {
+			return fmt.Errorf("failed to remove label off node: %w", err)
+		}
+
+		if err := testutils.VerifyLabelsRemoved(c, nodes.Items[i].Name, labelKeys); err != nil {
+			return fmt.Errorf("failed to verify label removed from node: %w", err)
+		}
 	}
 
 	return nil
@@ -43,7 +69,7 @@ func checkNodeHasLabel(c kubernetes.Interface, labelKey, labelValue string) erro
 		return fmt.Errorf("failed to list node: %w", err)
 	}
 	for i := range nodes.Items {
-		framework.ExpectNodeHasLabel(c, nodes.Items[i].Name, labelKey, labelValue)
+		e2enode.ExpectNodeHasLabel(context.TODO(), c, nodes.Items[i].Name, labelKey, labelValue)
 	}
 
 	return nil

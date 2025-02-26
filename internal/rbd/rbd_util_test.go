@@ -17,11 +17,14 @@ limitations under the License.
 package rbd
 
 import (
+	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	librbd "github.com/ceph/go-ceph/rbd"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestHasSnapshotFeature(t *testing.T) {
@@ -38,7 +41,7 @@ func TestHasSnapshotFeature(t *testing.T) {
 	rv := rbdVolume{}
 
 	for _, test := range tests {
-		rv.imageFeatureSet = librbd.FeatureSetFromNames(strings.Split(test.features, ","))
+		rv.ImageFeatureSet = librbd.FeatureSetFromNames(strings.Split(test.features, ","))
 		if got := rv.hasSnapshotFeature(); got != test.hasFeature {
 			t.Errorf("hasSnapshotFeature(%s) = %t, want %t", test.features, got, test.hasFeature)
 		}
@@ -86,20 +89,36 @@ func TestValidateImageFeatures(t *testing.T) {
 			"",
 		},
 		{
+			"layering,exclusive-lock,object-map,fast-diff",
+			&rbdVolume{
+				Mounter: rbdDefaultMounter,
+			},
+			false,
+			"",
+		},
+		{
 			"layering,journaling",
 			&rbdVolume{
-				Mounter: rbdNbdMounter,
+				Mounter: rbdDefaultMounter,
 			},
 			true,
 			"feature journaling requires exclusive-lock to be set",
 		},
 		{
-			"layering,exclusive-lock,journaling",
+			"object-map,fast-diff",
 			&rbdVolume{
 				Mounter: rbdDefaultMounter,
 			},
 			true,
-			"feature exclusive-lock requires rbd-nbd for mounter",
+			"feature object-map requires exclusive-lock to be set",
+		},
+		{
+			"fast-diff",
+			&rbdVolume{
+				Mounter: rbdDefaultMounter,
+			},
+			true,
+			"feature fast-diff requires object-map to be set",
 		},
 		{
 			"layering,exclusive-lock,journaling",
@@ -107,7 +126,15 @@ func TestValidateImageFeatures(t *testing.T) {
 				Mounter: rbdDefaultMounter,
 			},
 			true,
-			"feature exclusive-lock requires rbd-nbd for mounter",
+			"feature journaling requires rbd-nbd for mounter",
+		},
+		{
+			"layering,exclusive-lock,journaling",
+			&rbdVolume{
+				Mounter: rbdDefaultMounter,
+			},
+			true,
+			"feature journaling requires rbd-nbd for mounter",
 		},
 		{
 			"layering,exclusive-loc,journaling",
@@ -125,68 +152,24 @@ func TestValidateImageFeatures(t *testing.T) {
 			true,
 			"invalid feature ayering",
 		},
+		{
+			"deep-flatten",
+			&rbdVolume{
+				Mounter: rbdDefaultMounter,
+			},
+			false,
+			"",
+		},
 	}
 
 	for _, test := range tests {
 		err := test.rbdVol.validateImageFeatures(test.imageFeatures)
 		if test.isErr {
-			assert.EqualError(t, err, test.errMsg)
+			require.EqualError(t, err, test.errMsg)
 
 			continue
 		}
-		assert.Nil(t, err)
-	}
-}
-
-func TestGetMappedID(t *testing.T) {
-	t.Parallel()
-	type args struct {
-		key   string
-		value string
-		id    string
-	}
-	tests := []struct {
-		name     string
-		args     args
-		expected string
-	}{
-		{
-			name: "test for matching key",
-			args: args{
-				key:   "cluster1",
-				value: "cluster2",
-				id:    "cluster1",
-			},
-			expected: "cluster2",
-		},
-		{
-			name: "test for matching value",
-			args: args{
-				key:   "cluster1",
-				value: "cluster2",
-				id:    "cluster2",
-			},
-			expected: "cluster1",
-		},
-		{
-			name: "test for invalid match",
-			args: args{
-				key:   "cluster1",
-				value: "cluster2",
-				id:    "cluster3",
-			},
-			expected: "",
-		},
-	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			val := getMappedID(tt.args.key, tt.args.value, tt.args.id)
-			if val != tt.expected {
-				t.Errorf("getMappedID() got = %v, expected %v", val, tt.expected)
-			}
-		})
+		require.NoError(t, err)
 	}
 }
 
@@ -250,12 +233,156 @@ func TestGetCephClientLogFileName(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			val := getCephClientLogFileName(tt.args.id, tt.args.logDir, tt.args.prefix)
 			if val != tt.expected {
 				t.Errorf("getCephClientLogFileName() got = %v, expected %v", val, tt.expected)
+			}
+		})
+	}
+}
+
+func TestStrategicActionOnLogFile(t *testing.T) {
+	t.Parallel()
+	ctx := context.TODO()
+	tmpDir := t.TempDir()
+
+	var logFile [3]string
+	for i := range 3 {
+		f, err := os.CreateTemp(tmpDir, "rbd-*.log")
+		if err != nil {
+			t.Errorf("creating tempfile failed: %v", err)
+		}
+		logFile[i] = f.Name()
+	}
+
+	type args struct {
+		logStrategy string
+		logFile     string
+	}
+	tests := []struct {
+		name string
+		args args
+	}{
+		{
+			name: "test for compress",
+			args: args{
+				logStrategy: "compress",
+				logFile:     logFile[0],
+			},
+		},
+		{
+			name: "test for remove",
+			args: args{
+				logStrategy: "remove",
+				logFile:     logFile[1],
+			},
+		},
+		{
+			name: "test for preserve",
+			args: args{
+				logStrategy: "preserve",
+				logFile:     logFile[2],
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			strategicActionOnLogFile(ctx, tt.args.logStrategy, tt.args.logFile)
+
+			var err error
+			switch tt.args.logStrategy {
+			case "compress":
+				newExt := strings.ReplaceAll(tt.args.logFile, ".log", ".gz")
+				if _, err = os.Stat(newExt); os.IsNotExist(err) {
+					t.Errorf("compressed logFile (%s) not found: %v", newExt, err)
+				}
+				os.Remove(newExt)
+			case "remove":
+				if _, err = os.Stat(tt.args.logFile); !os.IsNotExist(err) {
+					t.Errorf("logFile (%s) not removed: %v", tt.args.logFile, err)
+				}
+			case "preserve":
+				if _, err = os.Stat(tt.args.logFile); os.IsNotExist(err) {
+					t.Errorf("logFile (%s) not preserved: %v", tt.args.logFile, err)
+				}
+				os.Remove(tt.args.logFile)
+			}
+		})
+	}
+}
+
+func TestIsKrbdFeatureSupported(t *testing.T) {
+	t.Parallel()
+	ctx := context.TODO()
+
+	tests := []struct {
+		name        string
+		featureName string
+		isSupported bool
+	}{
+		{
+			name:        "supported feature",
+			featureName: "layering",
+			isSupported: true,
+		},
+		{
+			name:        "not supported feature",
+			featureName: "journaling",
+			isSupported: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var err error
+			krbdSupportedFeaturesAttr := "0x1"
+			krbdFeatures, err = HexStringToInteger(krbdSupportedFeaturesAttr) // initialize krbdFeatures
+			if err != nil {
+				t.Errorf("HexStringToInteger(%s) failed", krbdSupportedFeaturesAttr)
+			}
+			// In case /sys/bus/rbd/supported_features is absent and we are
+			// not in a position to prepare krbd feature attributes,
+			// isKrbdFeatureSupported returns error ErrNotExist
+			supported, err := isKrbdFeatureSupported(ctx, tt.featureName)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("isKrbdFeatureSupported(%s) returned error: %v", tt.featureName, err)
+			} else if supported != tt.isSupported {
+				t.Errorf("isKrbdFeatureSupported(%s) returned supported status, expected: %t, got: %t",
+					tt.featureName, tt.isSupported, supported)
+			}
+		})
+	}
+}
+
+func Test_checkValidImageFeatures(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		imageFeatures string
+		ok            bool
+		want          bool
+	}{
+		{
+			name:          "test for valid image features",
+			imageFeatures: "layering,exclusive-lock,object-map,fast-diff,deep-flatten",
+			ok:            true,
+			want:          true,
+		},
+		{
+			name:          "test for empty image features",
+			imageFeatures: "",
+			ok:            true,
+			want:          false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := checkValidImageFeatures(tt.imageFeatures, tt.ok); got != tt.want {
+				t.Errorf("checkValidImageFeatures() = %v, want %v", got, tt.want)
 			}
 		})
 	}

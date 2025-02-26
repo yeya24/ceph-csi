@@ -1,10 +1,10 @@
 # Ceph CSI driver Release Process
 
 - [Ceph CSI driver Release Process](#ceph-csi-driver-release-process)
-  - [Introduction](#introduction)
-  - [Versioning](#versioning)
-  - [Tagging repositories](#tagging-repositories)
-  - [Release process [TBD]](#release-process-tbd)
+   - [Introduction](#introduction)
+   - [Versioning](#versioning)
+   - [Tagging repositories](#tagging-repositories)
+   - [Release process [TBD]](#release-process-tbd)
 
 ## Introduction
 
@@ -41,7 +41,7 @@ and it must be backward compatible.
 
 - When `MAJOR` increases, the new release adds **new features,
   bug fixes, or both** and which *changes the behavior from
-  the previous release* (may be backward incompatible).
+  the previous release* (maybe backward incompatible).
 
 ## Tagging repositories
 

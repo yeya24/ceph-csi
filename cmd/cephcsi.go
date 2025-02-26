@@ -26,21 +26,27 @@ import (
 	"github.com/ceph/ceph-csi/internal/cephfs"
 	"github.com/ceph/ceph-csi/internal/controller"
 	"github.com/ceph/ceph-csi/internal/controller/persistentvolume"
+	"github.com/ceph/ceph-csi/internal/controller/volumegroup"
 	"github.com/ceph/ceph-csi/internal/liveness"
-	"github.com/ceph/ceph-csi/internal/rbd"
+	nfsdriver "github.com/ceph/ceph-csi/internal/nfs/driver"
+	rbddriver "github.com/ceph/ceph-csi/internal/rbd/driver"
 	"github.com/ceph/ceph-csi/internal/util"
+	"github.com/ceph/ceph-csi/internal/util/log"
 
 	"k8s.io/klog/v2"
+	ctrlLog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
 	rbdType        = "rbd"
-	cephfsType     = "cephfs"
+	cephFSType     = "cephfs"
+	nfsType        = "nfs"
 	livenessType   = "liveness"
 	controllerType = "controller"
 
 	rbdDefaultName      = "rbd.csi.ceph.com"
-	cephfsDefaultName   = "cephfs.csi.ceph.com"
+	cephFSDefaultName   = "cephfs.csi.ceph.com"
+	nfsDefaultName      = "nfs.csi.ceph.com"
 	livenessDefaultName = "liveness.csi.ceph.com"
 
 	pollTime     = 60 // seconds
@@ -50,22 +56,24 @@ const (
 	defaultNS = "default"
 
 	defaultPluginPath  = "/var/lib/kubelet/plugins"
-	defaultStagingPath = defaultPluginPath + "/kubernetes.io/csi/pv/"
+	defaultStagingPath = defaultPluginPath + "/kubernetes.io/csi/"
 )
 
 var conf util.Config
 
 func init() {
 	// common flags
-	flag.StringVar(&conf.Vtype, "type", "", "driver type [rbd|cephfs|liveness|controller]")
-	flag.StringVar(&conf.Endpoint, "endpoint", "unix://tmp/csi.sock", "CSI endpoint")
+	flag.StringVar(&conf.Vtype, "type", "", "driver type [rbd|cephfs|nfs|liveness|controller]")
+	flag.StringVar(&conf.Endpoint, "endpoint", "unix:///tmp/csi.sock", "CSI endpoint")
 	flag.StringVar(&conf.DriverName, "drivername", "", "name of the driver")
 	flag.StringVar(&conf.DriverNamespace, "drivernamespace", defaultNS, "namespace in which driver is deployed")
 	flag.StringVar(&conf.NodeID, "nodeid", "", "node id")
 	flag.StringVar(&conf.PluginPath, "pluginpath", defaultPluginPath, "plugin path")
 	flag.StringVar(&conf.StagingPath, "stagingpath", defaultStagingPath, "staging path")
-	flag.StringVar(&conf.InstanceID, "instanceid", "", "Unique ID distinguishing this instance of Ceph CSI among other"+
-		" instances, when sharing Ceph clusters across CSI instances for provisioning")
+	flag.StringVar(&conf.ClusterName, "clustername", "", "name of the cluster")
+	flag.BoolVar(&conf.SetMetadata, "setmetadata", false, "set metadata on the volume")
+	flag.StringVar(&conf.InstanceID, "instanceid", "default", "Unique ID distinguishing this instance of Ceph-CSI"+
+		" among other instances, when sharing Ceph clusters across CSI instances for provisioning")
 	flag.IntVar(&conf.PidLimit, "pidlimit", 0, "the PID limit to configure through cgroups")
 	flag.BoolVar(&conf.IsControllerServer, "controllerserver", false, "start cephcsi controller server")
 	flag.BoolVar(&conf.IsNodeServer, "nodeserver", false, "start cephcsi node server")
@@ -73,8 +81,15 @@ func init() {
 		&conf.DomainLabels,
 		"domainlabels",
 		"",
-		"list of kubernetes node labels, that determines the topology"+
+		"list of Kubernetes node labels, that determines the topology"+
 			" domain the node belongs to, separated by ','")
+	flag.BoolVar(&conf.EnableReadAffinity, "enable-read-affinity", false, "enable read affinity")
+	flag.StringVar(
+		&conf.CrushLocationLabels,
+		"crush-location-labels",
+		"",
+		"list of Kubernetes node labels, that determines the"+
+			" CRUSH location the node belongs to, separated by ','")
 
 	// cephfs related flags
 	flag.BoolVar(
@@ -82,9 +97,24 @@ func init() {
 		"forcecephkernelclient",
 		false,
 		"enable Ceph Kernel clients on kernel < 4.17 which support quotas")
+	flag.StringVar(
+		&conf.KernelMountOptions,
+		"kernelmountoptions",
+		"",
+		"Comma separated string of mount options accepted by cephfs kernel mounter")
+	flag.StringVar(
+		&conf.RadosNamespaceCephFS,
+		"radosnamespacecephfs",
+		"",
+		"CephFS RadosNamespace used to store CSI specific objects and keys.")
+	flag.StringVar(
+		&conf.FuseMountOptions,
+		"fusemountoptions",
+		"",
+		"Comma separated string of mount options accepted by ceph-fuse mounter")
 
-	// liveness/grpc metrics related flags
-	flag.IntVar(&conf.MetricsPort, "metricsport", 8080, "TCP port for liveness/grpc metrics requests")
+	// liveness/profile metrics related flags
+	flag.IntVar(&conf.MetricsPort, "metricsport", 8080, "TCP port for liveness/profile metrics requests")
 	flag.StringVar(
 		&conf.MetricsPath,
 		"metricspath",
@@ -92,14 +122,11 @@ func init() {
 		"path of prometheus endpoint where metrics will be available")
 	flag.DurationVar(&conf.PollTime, "polltime", time.Second*pollTime, "time interval in seconds between each poll")
 	flag.DurationVar(&conf.PoolTimeout, "timeout", time.Second*probeTimeout, "probe timeout in seconds")
-
-	flag.BoolVar(&conf.EnableGRPCMetrics, "enablegrpcmetrics", false, "[DEPRECATED] enable grpc metrics")
-	flag.StringVar(
-		&conf.HistogramOption,
-		"histogramoption",
-		"0.5,2,6",
-		"[DEPRECATED] Histogram option for grpc metrics, should be comma separated value, "+
-			"ex:= 0.5,2,6 where start=0.5 factor=2, count=6")
+	flag.DurationVar(
+		&conf.LogSlowOpInterval,
+		"logslowopinterval",
+		time.Second*30,
+		"how often to inform about slow gRPC calls")
 
 	flag.UintVar(
 		&conf.RbdHardMaxCloneDepth,
@@ -127,10 +154,14 @@ func init() {
 	flag.BoolVar(&conf.Version, "version", false, "Print cephcsi version information")
 	flag.BoolVar(&conf.EnableProfiling, "enableprofiling", false, "enable go profiling")
 
+	// CSI-Addons configuration
+	flag.StringVar(&conf.CSIAddonsEndpoint, "csi-addons-endpoint", "unix:///tmp/csi-addons.sock", "CSI-Addons endpoint")
+
 	klog.InitFlags(nil)
 	if err := flag.Set("logtostderr", "true"); err != nil {
 		klog.Exitf("failed to set logtostderr flag: %v", err)
 	}
+	ctrlLog.SetLogger(klog.NewKlogr())
 	flag.Parse()
 }
 
@@ -143,8 +174,10 @@ func getDriverName() string {
 	switch conf.Vtype {
 	case rbdType:
 		return rbdDefaultName
-	case cephfsType:
-		return cephfsDefaultName
+	case cephFSType:
+		return cephFSDefaultName
+	case nfsType:
+		return nfsDefaultName
 	case livenessType:
 		return livenessDefaultName
 	default:
@@ -152,19 +185,23 @@ func getDriverName() string {
 	}
 }
 
+func printVersion() {
+	fmt.Println("Cephcsi Version:", util.DriverVersion)
+	fmt.Println("Git Commit:", util.GitCommit)
+	fmt.Println("Go Version:", runtime.Version())
+	fmt.Println("Compiler:", runtime.Compiler)
+	fmt.Printf("Platform: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	if kv, err := util.GetKernelVersion(); err == nil {
+		fmt.Println("Kernel:", kv)
+	}
+}
+
 func main() {
 	if conf.Version {
-		fmt.Println("Cephcsi Version:", util.DriverVersion)
-		fmt.Println("Git Commit:", util.GitCommit)
-		fmt.Println("Go Version:", runtime.Version())
-		fmt.Println("Compiler:", runtime.Compiler)
-		fmt.Printf("Platform: %s/%s\n", runtime.GOOS, runtime.GOARCH)
-		if kv, err := util.GetKernelVersion(); err == nil {
-			fmt.Println("Kernel:", kv)
-		}
+		printVersion()
 		os.Exit(0)
 	}
-	util.DefaultLog("Driver version: %s and Git version: %s", util.DriverVersion, util.GitCommit)
+	log.DefaultLog("Driver version: %s and Git version: %s", util.DriverVersion, util.GitCommit)
 
 	if conf.Vtype == "" {
 		logAndExit("driver type not specified")
@@ -176,26 +213,9 @@ func main() {
 		logAndExit(err.Error())
 	}
 
-	// the driver may need a higher PID limit for handling all concurrent requests
-	if conf.PidLimit != 0 {
-		currentLimit, pidErr := util.GetPIDLimit()
-		if pidErr != nil {
-			klog.Errorf("Failed to get the PID limit, can not reconfigure: %v", pidErr)
-		} else {
-			util.DefaultLog("Initial PID limit is set to %d", currentLimit)
-			err = util.SetPIDLimit(conf.PidLimit)
-			switch {
-			case err != nil:
-				klog.Errorf("Failed to set new PID limit to %d: %v", conf.PidLimit, err)
-			case conf.PidLimit == -1:
-				util.DefaultLog("Reconfigured PID limit to %d (max)", conf.PidLimit)
-			default:
-				util.DefaultLog("Reconfigured PID limit to %d", conf.PidLimit)
-			}
-		}
-	}
+	setPIDLimit(&conf)
 
-	if conf.EnableGRPCMetrics || conf.Vtype == livenessType {
+	if conf.EnableProfiling || conf.Vtype == livenessType {
 		// validate metrics endpoint
 		conf.MetricsIP = os.Getenv("POD_IP")
 
@@ -209,16 +229,24 @@ func main() {
 		}
 	}
 
-	util.DefaultLog("Starting driver type: %v with name: %v", conf.Vtype, dname)
+	if err = util.WriteCephConfig(); err != nil {
+		log.FatalLogMsg("failed to write ceph configuration file (%v)", err)
+	}
+
+	log.DefaultLog("Starting driver type: %v with name: %v", conf.Vtype, dname)
 	switch conf.Vtype {
 	case rbdType:
 		validateCloneDepthFlag(&conf)
-		validateMaxSnaphostFlag(&conf)
-		driver := rbd.NewDriver()
+		validateMaxSnapshotFlag(&conf)
+		driver := rbddriver.NewDriver()
 		driver.Run(&conf)
 
-	case cephfsType:
+	case cephFSType:
 		driver := cephfs.NewDriver()
+		driver.Run(&conf)
+
+	case nfsType:
+		driver := nfsdriver.NewDriver()
 		driver.Run(&conf)
 
 	case livenessType:
@@ -226,8 +254,11 @@ func main() {
 
 	case controllerType:
 		cfg := controller.Config{
-			DriverName: dname,
-			Namespace:  conf.DriverNamespace,
+			DriverName:  dname,
+			Namespace:   conf.DriverNamespace,
+			ClusterName: conf.ClusterName,
+			InstanceID:  conf.InstanceID,
+			SetMetadata: conf.SetMetadata,
 		}
 		// initialize all controllers before starting.
 		initControllers()
@@ -240,10 +271,33 @@ func main() {
 	os.Exit(0)
 }
 
+func setPIDLimit(conf *util.Config) {
+	// set pidLimit only for NodeServer
+	// the driver may need a higher PID limit for handling all concurrent requests
+	if conf.IsNodeServer && conf.PidLimit != 0 {
+		currentLimit, pidErr := util.GetPIDLimit()
+		if pidErr != nil {
+			klog.Errorf("Failed to get the PID limit, can not reconfigure: %v", pidErr)
+		} else {
+			log.DefaultLog("Initial PID limit is set to %d", currentLimit)
+			err := util.SetPIDLimit(conf.PidLimit)
+			switch {
+			case err != nil:
+				klog.Errorf("Failed to set new PID limit to %d: %v", conf.PidLimit, err)
+			case conf.PidLimit == -1:
+				log.DefaultLog("Reconfigured PID limit to %d (max)", conf.PidLimit)
+			default:
+				log.DefaultLog("Reconfigured PID limit to %d", conf.PidLimit)
+			}
+		}
+	}
+}
+
 // initControllers will initialize all the controllers.
 func initControllers() {
 	// Add list of controller here.
 	persistentvolume.Init()
+	volumegroup.Init()
 }
 
 func validateCloneDepthFlag(conf *util.Config) {
@@ -257,7 +311,7 @@ func validateCloneDepthFlag(conf *util.Config) {
 	}
 }
 
-func validateMaxSnaphostFlag(conf *util.Config) {
+func validateMaxSnapshotFlag(conf *util.Config) {
 	// maximum number of snapshots on an image are 510 [1] and 16 images in
 	// a parent/child chain [2],keeping snapshot limit to 500 to avoid issues.
 	// [1] https://github.com/torvalds/linux/blob/master/drivers/block/rbd.c#L98

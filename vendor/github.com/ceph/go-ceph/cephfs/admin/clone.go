@@ -1,5 +1,3 @@
-// +build !luminous,!mimic
-
 package admin
 
 import (
@@ -30,7 +28,8 @@ type CloneOptions struct {
 // specified using the clone options parameter.
 //
 // Similar To:
-//  ceph fs subvolume snapshot clone <volume> --group_name=<group> <subvolume> <snapshot> <name> [...]
+//
+//	ceph fs subvolume snapshot clone <volume> --group_name=<group> <subvolume> <snapshot> <name> [...]
 func (fsa *FSAdmin) CloneSubVolumeSnapshot(volume, group, subvolume, snapshot, name string, o *CloneOptions) error {
 	m := map[string]string{
 		"prefix":          "fs subvolume snapshot clone",
@@ -82,14 +81,32 @@ type CloneSource struct {
 	Snapshot  string `json:"snapshot"`
 }
 
+// CloneProgressReport contains the progress report of a subvolume clone.
+type CloneProgressReport struct {
+	PercentageCloned string `json:"percentage cloned"`
+	AmountCloned     string `json:"amount cloned"`
+	FilesCloned      string `json:"files cloned"`
+}
+
 // CloneStatus reports on the status of a subvolume clone.
 type CloneStatus struct {
-	State  CloneState  `json:"state"`
-	Source CloneSource `json:"source"`
+	State          CloneState          `json:"state"`
+	Source         CloneSource         `json:"source"`
+	ProgressReport CloneProgressReport `json:"progress_report"`
+
+	// failure can be obtained through .GetFailure()
+	failure *CloneFailure
+}
+
+// CloneFailure reports details of a failure after a subvolume clone failed.
+type CloneFailure struct {
+	Errno  string `json:"errno"`
+	ErrStr string `json:"errstr"`
 }
 
 type cloneStatusWrapper struct {
-	Status CloneStatus `json:"status"`
+	Status  CloneStatus  `json:"status"`
+	Failure CloneFailure `json:"failure"`
 }
 
 func parseCloneStatus(res response) (*CloneStatus, error) {
@@ -97,13 +114,17 @@ func parseCloneStatus(res response) (*CloneStatus, error) {
 	if err := res.NoStatus().Unmarshal(&status).End(); err != nil {
 		return nil, err
 	}
+	if status.Failure.Errno != "" || status.Failure.ErrStr != "" {
+		status.Status.failure = &status.Failure
+	}
 	return &status.Status, nil
 }
 
 // CloneStatus returns data reporting the status of a subvolume clone.
 //
 // Similar To:
-//  ceph fs clone status <volume> --group_name=<group> <clone>
+//
+//	ceph fs clone status <volume> --group_name=<group> <clone>
 func (fsa *FSAdmin) CloneStatus(volume, group, clone string) (*CloneStatus, error) {
 	m := map[string]string{
 		"prefix":     "fs clone status",
@@ -121,7 +142,8 @@ func (fsa *FSAdmin) CloneStatus(volume, group, clone string) (*CloneStatus, erro
 // CancelClone does not delete the clone.
 //
 // Similar To:
-//  ceph fs clone cancel <volume> --group_name=<group> <clone>
+//
+//	ceph fs clone cancel <volume> --group_name=<group> <clone>
 func (fsa *FSAdmin) CancelClone(volume, group, clone string) error {
 	m := map[string]string{
 		"prefix":     "fs clone cancel",

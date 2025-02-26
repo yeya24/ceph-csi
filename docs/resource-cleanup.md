@@ -3,7 +3,7 @@
 If the PVC is created with storage class which is having the `reclaimPolicy`
 as `Retain` will not delete the PV object, backend omap metadata and backend image.
 Manual deletion of PV will result in stale omap keys, values,
-cephfs subvolume and rbd image.
+cephFS subvolume and rbd image.
 It is required to cleanup metadata and image separately.
 
 ## Steps
@@ -28,7 +28,7 @@ a. get pv_name
 ### 2. Get omap key/value
 
 a. get omapkey (suffix of csi.volumes.default is value used for the CLI option
-   [--instanceid](deploy-rbd.md#configuration) in the provisioner deployment.)
+   [--instanceid](rbd/deploy.md#configuration) in the provisioner deployment.)
 
   ```
   rados listomapkeys csi.volumes.default -p pool_name | grep pv_name
@@ -56,7 +56,7 @@ b. get omapval
 
 ### 3. Delete the RBD image or CephFS subvolume
 
-a. remove rbd image(csi-vol-omapval, the prefix csi-vol is value of [volumeNamePrefix](deploy-rbd.md#configuration))
+a. remove rbd image(csi-vol-omapval, the prefix csi-vol is value of [volumeNamePrefix](rbd/deploy.md#configuration))
 
   ```
   rbd remove rbd_image_name -p pool_name
@@ -67,7 +67,7 @@ a. remove rbd image(csi-vol-omapval, the prefix csi-vol is value of [volumeNameP
   Removing image: 100% complete...done.
   ```
 
-b. remove cephfs subvolume(csi-vol-omapval)
+b. remove cephFS subvolume(csi-vol-omapval)
 
   ```
   ceph fs subvolume rm volume_name subvolume_name group_name

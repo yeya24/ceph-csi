@@ -1,7 +1,7 @@
 # Metrics
 
 - [Metrics](#metrics)
-  - [Liveness](#liveness)
+   - [Liveness](#liveness)
 
 ## Liveness
 
@@ -22,14 +22,14 @@ curl -X GET http://10.109.65.142:8080/metrics 2>/dev/null | grep csi
 csi_liveness 1
 ```
 
-Promethues can be deployed through the promethues operator described [here](https://coreos.com/operators/prometheus/docs/latest/user-guides/getting-started.html).
-The [service-monitor](../examples/service-monitor.yaml) will tell promethues how
+Prometheus can be deployed through the prometheus operator described [here](https://coreos.com/operators/prometheus/docs/latest/user-guides/getting-started.html).
+The [service-monitor](../deploy/service-monitor.yaml) will tell prometheus how
 to pull metrics out of CSI.
 
-Each CSI pod has a service to expose the endpoint to prometheus. By default rbd
+Each CSI pod has a service to expose the endpoint to prometheus. By default, rbd
 pods run on port 8080 and cephfs 8081.
 These can be changed if desired or if multiple ceph clusters are deployed more
 ports will be used for additional CSI pods.
 
-Note: You may need to open the ports used in your firewall depending on how you
-cluster is setup.
+Note: You may need to open the ports used in your firewall depending on how your
+cluster has set up.

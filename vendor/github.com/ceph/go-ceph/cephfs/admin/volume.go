@@ -1,9 +1,8 @@
-// +build !luminous,!mimic
-
 package admin
 
 import (
 	"bytes"
+	"encoding/json"
 )
 
 var (
@@ -15,7 +14,8 @@ var (
 // ListVolumes return a list of volumes in this Ceph cluster.
 //
 // Similar To:
-//  ceph fs volume ls
+//
+//	ceph fs volume ls
 func (fsa *FSAdmin) ListVolumes() ([]string, error) {
 	res := fsa.rawMgrCommand(listVolumesCmd)
 	return parseListNames(res)
@@ -35,7 +35,8 @@ type FSPoolInfo struct {
 // file systems.
 //
 // Similar To:
-//  ceph fs ls
+//
+//	ceph fs ls
 func (fsa *FSAdmin) ListFileSystems() ([]FSPoolInfo, error) {
 	res := fsa.rawMonCommand(listFsCmd)
 	return parseFsList(res)
@@ -116,8 +117,40 @@ type VolumeStatus struct {
 	Pools      []VolumePool `json:"pools"`
 }
 
-func parseVolumeStatus(res response) (*VolumeStatus, error) {
-	var vs VolumeStatus
+type mdsVersionField struct {
+	Version string
+	Items   []struct {
+		Version string `json:"version"`
+	}
+}
+
+func (m *mdsVersionField) UnmarshalJSON(data []byte) (err error) {
+	if err = json.Unmarshal(data, &m.Version); err == nil {
+		return
+	}
+	return json.Unmarshal(data, &m.Items)
+}
+
+// volumeStatusResponse deals with the changing output of the mgr
+// api json
+type volumeStatusResponse struct {
+	Pools      []VolumePool    `json:"pools"`
+	MDSVersion mdsVersionField `json:"mds_version"`
+}
+
+func (v *volumeStatusResponse) volumeStatus() *VolumeStatus {
+	vstatus := &VolumeStatus{}
+	vstatus.Pools = v.Pools
+	if v.MDSVersion.Version != "" {
+		vstatus.MDSVersion = v.MDSVersion.Version
+	} else if len(v.MDSVersion.Items) > 0 {
+		vstatus.MDSVersion = v.MDSVersion.Items[0].Version
+	}
+	return vstatus
+}
+
+func parseVolumeStatus(res response) (*volumeStatusResponse, error) {
+	var vs volumeStatusResponse
 	res = res.NoStatus()
 	if !res.Ok() {
 		return nil, res.End()
@@ -137,12 +170,17 @@ func parseVolumeStatus(res response) (*VolumeStatus, error) {
 // VolumeStatus returns a VolumeStatus object for the given volume name.
 //
 // Similar To:
-//  ceph fs status cephfs <name>
+//
+//	ceph fs status cephfs <name>
 func (fsa *FSAdmin) VolumeStatus(name string) (*VolumeStatus, error) {
 	res := fsa.marshalMgrCommand(map[string]string{
 		"fs":     name,
 		"prefix": "fs status",
 		"format": "json",
 	})
-	return parseVolumeStatus(res)
+	v, err := parseVolumeStatus(res)
+	if err != nil {
+		return nil, err
+	}
+	return v.volumeStatus(), nil
 }

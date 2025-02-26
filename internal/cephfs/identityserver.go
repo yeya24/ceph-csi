@@ -33,7 +33,8 @@ type IdentityServer struct {
 // GetPluginCapabilities returns available capabilities of the ceph driver.
 func (is *IdentityServer) GetPluginCapabilities(
 	ctx context.Context,
-	req *csi.GetPluginCapabilitiesRequest) (*csi.GetPluginCapabilitiesResponse, error) {
+	req *csi.GetPluginCapabilitiesRequest,
+) (*csi.GetPluginCapabilitiesResponse, error) {
 	return &csi.GetPluginCapabilitiesResponse{
 		Capabilities: []*csi.PluginCapability{
 			{
@@ -53,7 +54,7 @@ func (is *IdentityServer) GetPluginCapabilities(
 			{
 				Type: &csi.PluginCapability_Service_{
 					Service: &csi.PluginCapability_Service{
-						Type: csi.PluginCapability_Service_VOLUME_ACCESSIBILITY_CONSTRAINTS,
+						Type: csi.PluginCapability_Service_GROUP_CONTROLLER_SERVICE,
 					},
 				},
 			},

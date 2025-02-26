@@ -26,31 +26,59 @@ parameters:
    # dataPool: <ec-data-pool>
 
    # (required) Ceph pool into which the RBD image shall be created
+   # (optional) If the topologyConstrainedPools is provided
    # eg: pool: rbdpool
    pool: <rbd-pool-name>
 
-   # Set thickProvision to true if you want RBD images to be fully allocated on
-   # creation (thin provisioning is the default).
-   thickProvision: "false"
-   # (required) RBD image features, CSI creates image with image-format 2
-   # CSI RBD currently supports `layering`, `journaling`, `exclusive-lock`
-   # features. If `journaling` is enabled, must enable `exclusive-lock` too.
-   # imageFeatures: layering,journaling,exclusive-lock
-   imageFeatures: layering
+   # (optional) RBD image features, CSI creates image with image-format 2 CSI
+   # RBD currently supports `layering`, `journaling`, `exclusive-lock`,
+   # `object-map`, `fast-diff`, `deep-flatten` features.
+   # Refer https://docs.ceph.com/en/latest/rbd/rbd-config-ref/#image-features
+   # for image feature dependencies.
+   # imageFeatures: layering,journaling,exclusive-lock,object-map,fast-diff
+   imageFeatures: "layering"
+
+   # (optional) Options to pass to the `mkfs` command while creating the
+   # filesystem on the RBD device. Check the man-page for the `mkfs` command
+   # for the filesystem for more details. When `mkfsOptions` is set here, the
+   # defaults will not be used, consider including them in this parameter.
+   #
+   # The default options depend on the csi.storage.k8s.io/fstype setting:
+   # - ext4: "-m0 -Enodiscard,lazy_itable_init=1,lazy_journal_init=1"
+   # - xfs: "-K"
+   #
+   # mkfsOptions: "-m0 -Ediscard -i1024"
+
+   # (optional) Specifies whether to try other mounters in case if the current
+   # mounter fails to mount the rbd image for any reason. True means fallback
+   # to next mounter, default is set to false.
+   # Note: tryOtherMounters is currently useful to fallback from krbd to rbd-nbd
+   # in case if any of the specified imageFeatures is not supported by krbd
+   # driver on node scheduled for application pod launch, but in the future this
+   # should work with any mounter type.
+   # tryOtherMounters: false
 
    # (optional) mapOptions is a comma-separated list of map options.
    # For krbd options refer
    # https://docs.ceph.com/docs/master/man/8/rbd/#kernel-rbd-krbd-options
    # For nbd options refer
    # https://docs.ceph.com/docs/master/man/8/rbd-nbd/#options
-   # mapOptions: lock_on_read,queue_depth=1024
+   # Format:
+   # mapOptions: "<mounter>:op1,op2;<mounter>:op1,op2"
+   # An empty mounter field is treated as krbd type for compatibility.
+   # eg:
+   # mapOptions: "krbd:lock_on_read,queue_depth=1024;nbd:try-netlink"
 
    # (optional) unmapOptions is a comma-separated list of unmap options.
    # For krbd options refer
    # https://docs.ceph.com/docs/master/man/8/rbd/#kernel-rbd-krbd-options
    # For nbd options refer
    # https://docs.ceph.com/docs/master/man/8/rbd-nbd/#options
-   # unmapOptions: force
+   # Format:
+   # unmapOptions: "<mounter>:op1,op2;<mounter>:op1,op2"
+   # An empty mounter field is treated as krbd type for compatibility.
+   # eg:
+   # unmapOptions: "krbd:force;nbd:force"
 
    # The secrets have to contain Ceph credentials with required access
    # to the 'pool'.
@@ -71,9 +99,17 @@ parameters:
 
    # (optional) ceph client log location, eg: rbd-nbd
    # By default host-path /var/log/ceph of node is bind-mounted into
-   # csi-rbdplugin pod at /var/log/ceph mount path. See docs/rbd-nbd.md
-   # for available configuration options.
+   # csi-rbdplugin pod at /var/log/ceph mount path. This is to configure
+   # target bindmount path used inside container for ceph clients logging.
+   # See docs/design/proposals/rbd-nbd.md for available configuration options.
    # cephLogDir: /var/log/ceph
+
+   # (optional) ceph client log strategy
+   # By default, log file belonging to a particular volume will be deleted
+   # on unmap, but you can choose to just compress instead of deleting it
+   # or even preserve the log file in text format as it is.
+   # Available options `remove` or `compress` or `preserve`
+   # cephLogStrategy: remove
 
    # (optional) Prefix to use for naming RBD images.
    # If omitted, defaults to "csi-vol-".
@@ -83,6 +119,14 @@ parameters:
    # By default it is disabled. Valid values are "true" or "false".
    # A string is expected here, i.e. "true", not true.
    # encrypted: "true"
+
+   # (optional) Select the encryption type when encrypted: "true" above.
+   # Valid values are:
+   #   "file": Enable file encryption on the mounted filesystem
+   #   "block": Encrypt RBD block device
+   # When unspecified assume type "block". "file" and "block" are
+   # mutually exclusive.
+   # encryptionType: "block"
 
    # (optional) Use external key management system for encryption passphrases by
    # specifying a unique ID matching KMS ConfigMap. The ID is only used for
@@ -110,7 +154,49 @@ parameters:
    #       {"domainLabel":"zone","value":"zone1"}]}
    #   ]
 
+   # Image striping, Refer https://docs.ceph.com/en/latest/man/8/rbd/#striping
+   # For more details
+   # (optional) stripe unit in bytes.
+   # stripeUnit: <>
+   # (optional) objects to stripe over before looping.
+   # stripeCount: <>
+   # (optional) The object size in bytes.
+   # objectSize: <>
+
+   # rbd volume QoS.
+   # QoS provides settings for rbd volume read/write iops
+   # and read/write bandwidth. There are 4 base qos parameters
+   # among them, when users apply for a volume capacity equal
+   # to or less than BaseVolSizebytes, use base qos limit.
+   # For the portion of capacity exceeding BaseVolSizebytes,
+   # QoS will be increased in steps set per GiB. If the step
+   # size parameter per GiB is not provided, only base QoS limit
+   # will be used and not associated with capacity size.
+   #
+   # note: currently supports rbd-nbd mounter.
+   #
+   # For more details
+   # (optional) the base limit of read operations per second.
+   # BaseReadIops: <>
+   # (optional) the base limit of write operations per second.
+   # BaseWriteIops: <>
+   # (optional) the base limit of read bytes per second.
+   # BaseReadBytesPerSecond: <>
+   # (optional) the base limit of write bytes per second.
+   # BaseWriteBytesPerSecond: <>
+   # (optional) the limit of read operations per GiB.
+   # ReadIopsPerGiB: <>
+   # (optional) the limit of write operations per GiB.
+   # WriteIopsPerGiB: <>
+   # (optional) the limit of read bytes per GiB.
+   # ReadBpsPerGiB: <>
+   # (optional) the limit of write bytes per GiB.
+   # WriteBpsPerGiB: <>
+   # (optional) min size of volume what use to calc qos beased on capacity.
+   # BaseVolSizeBytes:<>
 reclaimPolicy: Delete
 allowVolumeExpansion: true
+
+# If filesystem is xfs, nouuid will be automatically added to mountOptions
 mountOptions:
    - discard

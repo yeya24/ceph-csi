@@ -18,12 +18,17 @@ RBD_CHART_NAME="ceph-csi-rbd"
 DEPLOY_TIMEOUT=600
 DEPLOY_SC=0
 DEPLOY_SECRET=0
+ENABLE_READ_AFFINITY=1
 
 # ceph-csi specific variables
 NODE_LABEL_REGION="test.failure-domain/region"
 NODE_LABEL_ZONE="test.failure-domain/zone"
 REGION_VALUE="testregion"
 ZONE_VALUE="testzone"
+CRUSH_LOCATION_REGION_LABEL="topology.kubernetes.io/region"
+CRUSH_LOCATION_ZONE_LABEL="topology.kubernetes.io/zone"
+CRUSH_LOCATION_REGION_VALUE="east"
+CRUSH_LOCATION_ZONE_VALUE="east-zone1"
 
 example() {
     echo "examples:" >&2
@@ -136,7 +141,7 @@ install() {
         mkdir -p ${TEMP}
         # shellcheck disable=SC2021
         dist=$(echo "${dist}" | tr "[A-Z]" "[a-z]")
-        wget "https://get.helm.sh/helm-${HELM_VERSION}-${dist}-${arch}.tar.gz" -O "${TEMP}/helm.tar.gz"
+        wget "https://get.helm.sh/helm-${HELM_VERSION}-${dist}-${arch}.tar.gz" -O "${TEMP}/helm.tar.gz" || exit 1
         tar -C "${TEMP}" -zxvf "${TEMP}/helm.tar.gz"
     fi
     echo "Helm install successful"
@@ -148,12 +153,14 @@ install_cephcsi_helm_charts() {
         NAMESPACE="default"
     fi
 
-    kubectl_retry create namespace ${NAMESPACE}
+    kubectl_retry create namespace "${NAMESPACE}"
 
     # label the nodes uniformly for domain information
     for node in $(kubectl_retry get node -o jsonpath='{.items[*].metadata.name}'); do
         kubectl_retry label node/"${node}" ${NODE_LABEL_REGION}=${REGION_VALUE}
         kubectl_retry label node/"${node}" ${NODE_LABEL_ZONE}=${ZONE_VALUE}
+        kubectl_retry label node/"${node}" ${CRUSH_LOCATION_REGION_LABEL}=${CRUSH_LOCATION_REGION_VALUE}
+        kubectl_retry label node/"${node}" ${CRUSH_LOCATION_ZONE_LABEL}=${CRUSH_LOCATION_ZONE_VALUE}
     done
 
     # deploy storageclass if DEPLOY_SC flag is set
@@ -165,22 +172,29 @@ install_cephcsi_helm_charts() {
     if [ "${DEPLOY_SECRET}" -eq 1 ]; then
         fetch_template_values
         RBD_SECRET_TEMPLATE_VALUES="--set secret.create=true --set secret.userID=admin --set secret.userKey=${ADMIN_KEY}"
-        CEPHFS_SECRET_TEMPLATE_VALUES="--set secret.create=true --set secret.adminID=admin --set secret.adminKey=${ADMIN_KEY}"
+        CEPHFS_SECRET_TEMPLATE_VALUES="--set secret.create=true --set secret.userID=admin --set secret.userKey=${ADMIN_KEY}"
+    fi
+    # enable read affinity
+    if [ "${ENABLE_READ_AFFINITY}" -eq 1 ]; then
+        READ_AFFINITY_VALUES="--set readAffinity.enabled=true --set readAffinity.crushLocationLabels={${CRUSH_LOCATION_REGION_LABEL},${CRUSH_LOCATION_ZONE_LABEL}}"
     fi
     # install ceph-csi-cephfs and ceph-csi-rbd charts
     # shellcheck disable=SC2086
-    "${HELM}" install --namespace ${NAMESPACE} --set provisioner.fullnameOverride=csi-cephfsplugin-provisioner --set nodeplugin.fullnameOverride=csi-cephfsplugin --set configMapName=ceph-csi-config --set provisioner.podSecurityPolicy.enabled=true --set nodeplugin.podSecurityPolicy.enabled=true --set provisioner.replicaCount=1 ${SET_SC_TEMPLATE_VALUES} ${CEPHFS_SECRET_TEMPLATE_VALUES} ${CEPHFS_CHART_NAME} "${SCRIPT_DIR}"/../charts/ceph-csi-cephfs
-    check_deployment_status app=ceph-csi-cephfs ${NAMESPACE}
-    check_daemonset_status app=ceph-csi-cephfs ${NAMESPACE}
+    "${HELM}" install --namespace ${NAMESPACE} --set provisioner.fullnameOverride=csi-cephfsplugin-provisioner --set nodeplugin.fullnameOverride=csi-cephfsplugin --set configMapName=ceph-csi-config --set provisioner.replicaCount=1 --set-json='commonLabels={"app.kubernetes.io/name": "ceph-csi-cephfs", "app.kubernetes.io/managed-by": "helm"}' ${SET_SC_TEMPLATE_VALUES} ${CEPHFS_SECRET_TEMPLATE_VALUES} ${CEPHFS_CHART_NAME} "${SCRIPT_DIR}"/../charts/ceph-csi-cephfs ${READ_AFFINITY_VALUES} --set provisioner.snapshotter.args.enableVolumeGroupSnapshots=true
+    check_deployment_status app=ceph-csi-cephfs "${NAMESPACE}"
+    check_daemonset_status app=ceph-csi-cephfs "${NAMESPACE}"
 
-    # deleting configmap as a workaround to avoid configmap already present
+    # deleting configmaps as a workaround to avoid configmap already present
     # issue when installing ceph-csi-rbd
-    kubectl_retry delete cm ceph-csi-config --namespace ${NAMESPACE}
-    # shellcheck disable=SC2086
-    "${HELM}" install --namespace ${NAMESPACE} --set provisioner.fullnameOverride=csi-rbdplugin-provisioner --set nodeplugin.fullnameOverride=csi-rbdplugin --set configMapName=ceph-csi-config --set provisioner.podSecurityPolicy.enabled=true --set nodeplugin.podSecurityPolicy.enabled=true --set provisioner.replicaCount=1 ${SET_SC_TEMPLATE_VALUES} ${RBD_SECRET_TEMPLATE_VALUES} ${RBD_CHART_NAME} "${SCRIPT_DIR}"/../charts/ceph-csi-rbd --set topology.enabled=true --set topology.domainLabels="{${NODE_LABEL_REGION},${NODE_LABEL_ZONE}}" --set provisioner.maxSnapshotsOnImage=3 --set provisioner.minSnapshotsOnImage=2
+    kubectl_retry delete cm ceph-csi-config --namespace "${NAMESPACE}"
+    kubectl_retry delete cm ceph-config --namespace "${NAMESPACE}"
+    kubectl_retry delete cm ceph-csi-encryption-kms-config --namespace "${NAMESPACE}"
 
-    check_deployment_status app=ceph-csi-rbd ${NAMESPACE}
-    check_daemonset_status app=ceph-csi-rbd ${NAMESPACE}
+    # shellcheck disable=SC2086
+    "${HELM}" install --namespace ${NAMESPACE} --set provisioner.fullnameOverride=csi-rbdplugin-provisioner --set nodeplugin.fullnameOverride=csi-rbdplugin --set configMapName=ceph-csi-config --set provisioner.replicaCount=1 --set-json='commonLabels={"app.kubernetes.io/name": "ceph-csi-rbd", "app.kubernetes.io/managed-by": "helm"}' ${SET_SC_TEMPLATE_VALUES} ${RBD_SECRET_TEMPLATE_VALUES} ${RBD_CHART_NAME} "${SCRIPT_DIR}"/../charts/ceph-csi-rbd --set topology.domainLabels="{${NODE_LABEL_REGION},${NODE_LABEL_ZONE}}" --set provisioner.maxSnapshotsOnImage=3 --set provisioner.minSnapshotsOnImage=2 ${READ_AFFINITY_VALUES} --set provisioner.snapshotter.args.enableVolumeGroupSnapshots=true
+
+    check_deployment_status app=ceph-csi-rbd "${NAMESPACE}"
+    check_daemonset_status app=ceph-csi-rbd "${NAMESPACE}"
 
 }
 
@@ -189,15 +203,17 @@ cleanup_cephcsi_helm_charts() {
     for node in $(kubectl_retry get node --no-headers | cut -f 1 -d ' '); do
         kubectl_retry label node/"$node" test.failure-domain/region-
         kubectl_retry label node/"$node" test.failure-domain/zone-
+        kubectl_retry label node/"$node" "${CRUSH_LOCATION_REGION_LABEL}"-
+        kubectl_retry label node/"$node" "${CRUSH_LOCATION_ZONE_LABEL}"-
     done
     # TODO/LATER we could remove the CSI labels that would have been set as well
     NAMESPACE=$1
     if [ -z "$NAMESPACE" ]; then
         NAMESPACE="default"
     fi
-    "${HELM}" uninstall ${CEPHFS_CHART_NAME} --namespace ${NAMESPACE}
-    "${HELM}" uninstall ${RBD_CHART_NAME} --namespace ${NAMESPACE}
-    kubectl_retry delete namespace ${NAMESPACE}
+    "${HELM}" uninstall ${CEPHFS_CHART_NAME} --namespace "${NAMESPACE}"
+    "${HELM}" uninstall ${RBD_CHART_NAME} --namespace "${NAMESPACE}"
+    kubectl_retry delete namespace "${NAMESPACE}"
 }
 
 helm_reset() {
@@ -216,16 +232,14 @@ if ! helm_loc="$(type -p "helm")" || [[ -z ${helm_loc} ]]; then
     HELM="${TEMP}/${dist}-${arch}/helm"
 fi
 
-if [ "$#" -le 2 ]
-then
+if [ "$#" -le 2 ]; then
     ACTION=$1
     NAMESPACE=$2
     SKIP_PARSE="true"
 fi
 
 if [ ${#SKIP_PARSE} -eq 0 ]; then
-    while [ "$1" != "" ]
-    do
+    while [ "$1" != "" ]; do
         case $1 in
         up)
             shift

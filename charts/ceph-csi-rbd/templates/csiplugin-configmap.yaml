@@ -10,9 +10,10 @@ metadata:
     component: {{ .Values.nodeplugin.name }}
     release: {{ .Release.Name }}
     heritage: {{ .Release.Service }}
+    {{- with .Values.commonLabels }}{{ toYaml . | trim | nindent 4 }}{{- end }}
 data:
   config.json: |-
-{{ toJson .Values.csiConfig | indent 4 -}}
+{{ toJson .Values.csiConfig | indent 4 }}
   cluster-mapping.json: |-
-{{ toJson .Values.csiMapping | indent 4 -}}
+{{ toJson .Values.csiMapping | indent 4 }}
 {{- end }}

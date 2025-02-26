@@ -19,8 +19,6 @@ package rbd
 import "errors"
 
 var (
-	// ErrImageNotFound is returned when image name is not found in the cluster on the given pool and/or namespace.
-	ErrImageNotFound = errors.New("image not found")
 	// ErrSnapNotFound is returned when snap name passed is not found in the list of snapshots for the
 	// given image.
 	ErrSnapNotFound = errors.New("snapshot not found")
@@ -34,4 +32,27 @@ var (
 	ErrMissingStash = errors.New("missing stash")
 	// ErrFlattenInProgress is returned when flatten is in progress for an image.
 	ErrFlattenInProgress = errors.New("flatten in progress")
+	// ErrMissingMonitorsInVolID is returned when monitor information is missing in migration volID.
+	ErrMissingMonitorsInVolID = errors.New("monitor information can not be empty in volID")
+	// ErrMissingPoolNameInVolID is returned when pool information is missing in migration volID.
+	ErrMissingPoolNameInVolID = errors.New("pool information can not be empty in volID")
+	// ErrMissingImageNameInVolID is returned when image name information is missing in migration volID.
+	ErrMissingImageNameInVolID = errors.New("rbd image name information can not be empty in volID")
+	// ErrDecodeClusterIDFromMonsInVolID is returned when mons hash decoding on migration volID.
+	ErrDecodeClusterIDFromMonsInVolID = errors.New("failed to get clusterID from monitors hash in volID")
+	// ErrLastSyncTimeNotFound is returned when last sync time is not found for
+	// the image.
+	ErrLastSyncTimeNotFound = errors.New("last sync time not found")
+	// ErrFailedPrecondition is returned when operation is rejected because the system is not in a state
+	// required for the operation's execution.
+	ErrFailedPrecondition = errors.New("system is not in a state required for the operation's execution")
+	// ErrUnavailable is returned when the image needs to be recreated
+	// locally and may be corrected by retrying with a backoff.
+	ErrUnavailable = errors.New("image needs to be recreated")
+	// ErrAborted is returned when the operation is aborted.
+	ErrAborted = errors.New("operation got aborted")
+	// ErrInvalidArgument is returned when the client specified an invalid argument.
+	ErrInvalidArgument = errors.New("invalid arguments provided")
+	// ErrImageInUse is returned when the image is in use.
+	ErrImageInUse = errors.New("image is in use")
 )

@@ -1,12 +1,27 @@
+/*
+Copyright 2021 The Ceph-CSI Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2e
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
-	"github.com/ceph/ceph-csi/internal/util"
+	cephcsi "github.com/ceph/ceph-csi/api/deploy/kubernetes"
 
 	v1 "k8s.io/api/core/v1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
@@ -29,24 +44,32 @@ func createConfigMap(pluginPath string, c kubernetes.Interface, f *framework.Fra
 		return err
 	}
 
-	fsID, stdErr, err := execCommandInToolBoxPod(f, "ceph fsid", rookNamespace)
+	fsID, err := getClusterID(f)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get clusterID: %w", err)
 	}
-	if stdErr != "" {
-		return fmt.Errorf("error getting fsid %v", stdErr)
-	}
-	// remove new line present in fsID
-	fsID = strings.Trim(fsID, "\n")
+
 	// get mon list
 	mons, err := getMons(rookNamespace, c)
 	if err != nil {
 		return err
 	}
-	conmap := []util.ClusterInfo{{
-		ClusterID:      fsID,
-		Monitors:       mons,
-		RadosNamespace: radosNamespace,
+	conmap := []cephcsi.ClusterInfo{{
+		ClusterID: fsID,
+		Monitors:  mons,
+		RBD: cephcsi.RBD{
+			RadosNamespace: radosNamespace,
+		},
+		CephFS: cephcsi.CephFS{
+			RadosNamespace: radosNamespace,
+		},
+		ReadAffinity: cephcsi.ReadAffinity{
+			Enabled: true,
+			CrushLocationLabels: []string{
+				crushLocationRegionLabel,
+				crushLocationZoneLabel,
+			},
+		},
 	}}
 	if upgradeTesting {
 		subvolumegroup = "csi"
@@ -76,7 +99,11 @@ func createConfigMap(pluginPath string, c kubernetes.Interface, f *framework.Fra
 }
 
 // createCustomConfigMap provides multiple clusters information.
-func createCustomConfigMap(c kubernetes.Interface, pluginPath string, subvolgrpInfo map[string]string) error {
+func createCustomConfigMap(
+	c kubernetes.Interface,
+	pluginPath string,
+	clusterInfo map[string]map[string]string,
+) error {
 	path := pluginPath + configMap
 	cm := v1.ConfigMap{}
 	err := unmarshal(path, &cm)
@@ -90,22 +117,36 @@ func createCustomConfigMap(c kubernetes.Interface, pluginPath string, subvolgrpI
 	}
 	// get clusterIDs
 	var clusterID []string
-	for key := range subvolgrpInfo {
+	for key := range clusterInfo {
 		clusterID = append(clusterID, key)
 	}
-	conmap := []util.ClusterInfo{
-		{
-			ClusterID: clusterID[0],
-			Monitors:  mons,
-		},
-		{
-			ClusterID: clusterID[1],
-			Monitors:  mons,
-		},
+	conmap := make([]cephcsi.ClusterInfo, len(clusterID))
+
+	for i, j := range clusterID {
+		conmap[i].ClusterID = j
+		conmap[i].Monitors = mons
 	}
-	for i := 0; i < len(subvolgrpInfo); i++ {
-		conmap[i].CephFS.SubvolumeGroup = subvolgrpInfo[clusterID[i]]
+
+	// fill radosNamespace and subvolgroups
+	for cluster, confItems := range clusterInfo {
+		for i, j := range confItems {
+			switch i {
+			case "subvolumeGroup":
+				for c := range conmap {
+					if conmap[c].ClusterID == cluster {
+						conmap[c].CephFS.SubvolumeGroup = j
+					}
+				}
+			case "radosNamespace":
+				for c := range conmap {
+					if conmap[c].ClusterID == cluster {
+						conmap[c].RBD.RadosNamespace = j
+					}
+				}
+			}
+		}
 	}
+
 	data, err := json.Marshal(conmap)
 	if err != nil {
 		return err

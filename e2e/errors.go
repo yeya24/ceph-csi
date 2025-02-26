@@ -41,6 +41,30 @@ func isRetryableAPIError(err error) bool {
 		return true
 	}
 
+	// "unable to upgrade connection" happens occasionally when executing commands in Pods
+	if strings.Contains(err.Error(), "unable to upgrade connection") {
+		return true
+	}
+
+	// "transport is closing" is an internal gRPC err, we can not use ErrConnClosing
+	if strings.Contains(err.Error(), "transport is closing") {
+		return true
+	}
+
+	// "transport: missing content-type field" is an error that sometimes
+	// is returned while talking to the kubernetes-api-server. There does
+	// not seem to be a public error constant for this.
+	if strings.Contains(err.Error(), "transport: missing content-type field") {
+		return true
+	}
+
+	// "pod nfs-820 does not have a host assigned" seems to get reported
+	// when a Pod is not completely started yet, or was restarted while
+	// trying to access it
+	if strings.Contains(err.Error(), "does not have a host assigned") {
+		return true
+	}
+
 	return false
 }
 
@@ -103,8 +127,42 @@ func isAlreadyExistsCLIError(err error) bool {
 		if strings.TrimSuffix(s, "\n") == "" {
 			continue
 		}
+		// Ignore warnings
+		if strings.Contains(s, "Warning") {
+			continue
+		}
 		// Resource already exists error message
 		if !strings.Contains(s, "Error from server (AlreadyExists)") {
+			return false
+		}
+	}
+
+	return true
+}
+
+// isNotFoundCLIError checks for "is not found" error from kubectl CLI.
+func isNotFoundCLIError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// if multiple resources already exists. each error is separated by newline
+	stdErr := getStdErr(err.Error())
+	if stdErr == "" {
+		return false
+	}
+
+	stdErrs := strings.Split(stdErr, "\n")
+	for _, s := range stdErrs {
+		// If the string is just a new line continue
+		if strings.TrimSuffix(s, "\n") == "" {
+			continue
+		}
+		// Ignore warnings
+		if strings.Contains(s, "Warning") {
+			continue
+		}
+		// Resource not found error message
+		if !strings.Contains(s, "Error from server (NotFound)") {
 			return false
 		}
 	}
